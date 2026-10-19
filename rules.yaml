@@ -1,0 +1,8 @@
+# Public file. Only: rule id, check name, threshold, severity, owner role. Nothing else.
+rules:
+  - {id: R01, check: one_decision_per_card, threshold: 1, severity: medium, owner: bridge}
+  - {id: R02, check: root_topic_posts, threshold: 0, severity: medium, owner: bridge}
+  - {id: R05, check: ack_latency_s, threshold: 60, severity: low, owner: all}
+  - {id: R06, check: self_decision_pick, threshold: 80, severity: low, owner: all}
+  - {id: R07, check: secret_pattern, threshold: 0, severity: high, owner: all}
+  - {id: R17, check: idle_unblocked_todo_min, threshold: 60, severity: medium, owner: balancer}
