@@ -208,6 +208,14 @@ class R17V10Test(unittest.TestCase):
                                            "prs": [], "registry": reg}, NOW)
         self.assertEqual([x for x in f if x["count"] == 10], [])
 
+    def test_registered_login_for_other_agent_counts_unattributed(self):
+        reg = dict(REGD)
+        reg["logins"] = {"dina-gh": "dina"}
+        data = {"issues": [issue2(agent="karim", last_editor="dina-gh")], "prs": [], "registry": reg}
+        out = ck.github_issue_hygiene(RULE, data, NOW, baseline=True)
+        self.assertEqual(out["counts"]["editor_unattributed"], 1)
+        self.assertEqual([x for x in out["flags"] if x["count"] == 10], [])
+
     def test_editor_mismatch_without_trailer_no_v10(self):
         f = flagsd([issue2(agent="karim", last_editor="dina")])
         self.assertEqual([x for x in f if x["count"] == 10], [])

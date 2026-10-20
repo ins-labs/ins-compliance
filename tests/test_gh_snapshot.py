@@ -294,13 +294,15 @@ class NativeBlockedByTest(unittest.TestCase):
     def test_native_links_merge_and_close(self):
         pages = {
             "/issues/5/dependencies/blocked_by": [
-                {"number": 12, "state": "open"}, {"number": 44, "state": "closed"}],
+                {"number": 12, "state": "open"}, {"number": 44, "state": "open"}],
+            "/issues/44": {"number": 44, "state": "closed"},
             "/issues/5/events": [], "/issues/5/comments": [],
             "/issues": [issue(body="Due: 2026-10-21")],
         }
         (rows, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=FakeHTTP(pages))
         r = rows[0]
         self.assertEqual(r["blocked_by"], [12, 44])
+        # 44 closed per the fresh per-issue GET (link-listing states are never trusted)
         self.assertEqual(r["blocked_by_closed"], [44])
         self.assertTrue(r["blocked_line_present"])
         self.assertEqual(meta.get("blocked_native"), "rest")
@@ -373,7 +375,8 @@ class ProjectFieldsTest(unittest.TestCase):
     def http_with_project(self, gql_pages):
         base = {"/issues/5/events": [], "/issues/5/comments": [],
                 "/issues/5/dependencies/blocked_by": [{"number": 31, "state": "open"},
-                                                      {"number": 32, "state": "closed"}],
+                                                      {"number": 32, "state": "open"}],
+                "/issues/32": {"number": 32, "state": "closed"},
                 "/issues": [issue(body="no due here")]}
 
         class GqlHTTP(FakeHTTP):
@@ -483,7 +486,7 @@ class SnapshotCacheTest(unittest.TestCase):
         self.assertEqual(meta["deps_cached"], 0)
         cache = json.load(open(self.state))
         self.assertEqual(cache["r:5"]["last_editor"], "ins-dina")
-        self.assertEqual(cache["r:5"]["deps"], [[31, "open"]])
+        self.assertEqual(cache["r:5"]["deps"], [31])  # numbers only; states re-read each run
         import stat
         self.assertEqual(stat.S_IMODE(os.stat(self.state).st_mode), 0o600)
 
@@ -575,3 +578,34 @@ class ProjectPageCapTest(unittest.TestCase):
         out, capped = gs.project_fields(PG(), max_pages=3)
         self.assertTrue(capped)
         self.assertEqual(len(calls), 4)  # 1 find + 3 capped pages
+
+
+class CachedBlockerStateTest(unittest.TestCase):
+    """Amen PR #6: a closing blocker may not bump the blocked issue's
+    updated_ts. Cached deps are numbers only; states are re-read every run."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self.tok = os.path.join(self.tmp, "tok")
+        with open(self.tok, "w") as fh:
+            fh.write(TOKEN)
+        os.chmod(self.tok, 0o600)
+        self.state = os.path.join(self.tmp, "state.json")
+        self.env = {"GH_TOKEN_FILE": self.tok, "GH_SNAPSHOT_STATE": self.state}
+
+    def test_cached_deps_open_blocker_now_closed(self):
+        base = {"/issues/5/events": [], "/issues/5/comments": [],
+                "/issues/5/dependencies/blocked_by": [{"number": 31, "state": "open"}],
+                "/issues/31": {"number": 31, "state": "open"},
+                "/issues": [issue(body="Due: 2026-10-21")]}
+        (rows, _), _ = gs.snapshot(env=self.env, repos=["r"], opener=FakeHTTP(dict(base)))
+        self.assertEqual(rows[0]["blocked_by_closed"], [])
+        # blocker closes without the blocked issue changing
+        second = dict(base)
+        second["/issues/31"] = {"number": 31, "state": "closed"}
+        http2 = FakeHTTP(second)
+        (rows, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http2)
+        self.assertEqual(meta["deps_cached"], 1)          # cache hit, no deps call
+        self.assertEqual([u for u in http2.urls if "/dependencies/" in u], [])
+        self.assertEqual(rows[0]["blocked_by_closed"], [31])

@@ -188,7 +188,15 @@ def github_issue_hygiene(rule, gh_data, now, baseline=False):
             if named and agent and named != agent:
                 flag(ident, 10, note="report_only")  # V10: report, not a violation
         elif editor:
-            if etype == "bot" or str(editor).lower() in reg_shared or str(editor).lower() not in reg_logins:
+            e = str(editor).lower()
+            if etype == "bot" or e in reg_shared:
+                unattributed += 1
+            elif e in reg_logins:
+                # a registered login for a DIFFERENT agent is unattributed too
+                # (no trailer to confirm the handoff) - Amen PR #6
+                if agent and reg_logins[e] != agent:
+                    unattributed += 1
+            else:
                 unattributed += 1
         if not it.get("due"):
             flag(ident, 3)

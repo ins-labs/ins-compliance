@@ -19,9 +19,10 @@ Co-authored-by/Owner trailer from a newest commit reference included for V10
 attribution), project fields Status/Due from the org's "ins-work" project when
 a read:project token exists (GH_PROJECT_TOKEN_FILE), and native blocked-by
 links from the REST issue-dependencies endpoint (the circuit breaker trips on
-404/422 only, never on transient 5xx). Editor and dependency calls are cached
-by issue updated_ts when GH_SNAPSHOT_STATE points at a writable state file, so
-only issues changed since the last snapshot cost API calls. V5 silence
+404/422 only, never on transient 5xx). The cache (GH_SNAPSHOT_STATE, keyed by
+issue updated_ts) stores the editor and blocker NUMBERS only; blocker states
+are re-read every run because a closing blocker does not reliably bump the
+blocked issue's updated_ts (Amen PR #6). V5 silence
 windows: In progress = R17 threshold minutes, anything else (incl. Todo) = 24 h.
 
 Usage: gh_snapshot.py META_JSON [REPO ...] > issues.jsonl
@@ -297,20 +298,20 @@ def save_cache(path, cache):
     os.chmod(path, 0o600)
 
 
-def apply_blocked(row, native):
-    """Merge native blocked-by links [(num, state)] into a snapshot row."""
-    if not native:
+def apply_blocked(row, numbers):
+    """Merge native blocked-by link NUMBERS into a snapshot row. States are
+    never trusted from a cache or the link listing: the V6 loop re-reads every
+    blocker's state each run, so a closing blocker can never stay silently
+    open (Amen PR #6)."""
+    if not numbers:
         return
     have = set(row["blocked_by"])
-    for num, state in native:
+    for num in numbers:
         if num not in have:
             row["blocked_by"].append(num)
             have.add(num)
-        if state == "closed" and num not in row["blocked_by_closed"]:
-            row["blocked_by_closed"].append(num)
     row["blocked_by"].sort()
     row["blocked_line_present"] = True
-    row.setdefault("_native", set()).update(n for n, _ in native)
 
 
 def snapshot(env=None, repos=None, org=ORG, opener=None, gh=None):
@@ -392,7 +393,7 @@ def snapshot(env=None, repos=None, org=ORG, opener=None, gh=None):
                 else:
                     try:
                         deps = list_paginated(gh, f"/repos/{org}/{repo}/issues/{number}/dependencies/blocked_by")
-                        deps_list = [[d["number"], (d.get("state") or "").lower()] for d in deps if d.get("number")]
+                        deps_list = [d["number"] for d in deps if d.get("number")]
                         deps_ok = True
                     except GhError as e:
                         if e.status in (404, 422):
@@ -400,7 +401,7 @@ def snapshot(env=None, repos=None, org=ORG, opener=None, gh=None):
                         else:
                             deps_failed += 1  # transient: skip this issue, keep probing
             if deps_list:
-                apply_blocked(row, [tuple(d) for d in deps_list])
+                apply_blocked(row, deps_list)
             entry = {"updated_ts": row["updated_ts"]}
             if editor_ok:
                 entry["last_editor"] = row["last_editor"]
@@ -410,15 +411,15 @@ def snapshot(env=None, repos=None, org=ORG, opener=None, gh=None):
                 entry["deps"] = deps_list
             if len(entry) > 1:
                 new_cache[key] = entry
-        # V6 support: resolve the state of referenced blockers not in the open
-        # set and not already classified by native links
+        # V6 support: re-read every referenced blocker's state each run. A
+        # closing blocker does not always bump the blocked issue's updated_ts,
+        # so cached or link-listed states are never trusted (Amen PR #6).
         for row in rows:
             if row["repo"] != repo:
                 continue
-            closed = list(row["blocked_by_closed"])
-            known = set(closed) | row.get("_native", set())
+            closed = []
             for n in row["blocked_by"]:
-                if n in open_numbers or n in known:
+                if n in open_numbers:
                     continue
                 try:
                     one = gh.get(f"/repos/{org}/{repo}/issues/{n}")
@@ -428,7 +429,6 @@ def snapshot(env=None, repos=None, org=ORG, opener=None, gh=None):
                 if st == "closed":
                     closed.append(n)
             row["blocked_by_closed"] = closed
-            row.pop("_native", None)
     if state_path:
         try:
             save_cache(state_path, new_cache)
