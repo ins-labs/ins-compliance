@@ -1,0 +1,32 @@
+# Public file. Only: rule id, check name, threshold, severity, owner role. Nothing else.
+rules:
+  - {id: R01, check: one_decision_per_card, threshold: 1, severity: medium, owner: bridge}
+  - {id: R02, check: root_topic_posts, threshold: 0, severity: medium, owner: bridge}
+  - {id: R03, check: none, threshold: 0, severity: low, owner: all}
+  - {id: R04, check: none, threshold: 0, severity: low, owner: all}
+  - {id: R05, check: ack_latency_s, threshold: 60, severity: low, owner: all}
+  - {id: R06, check: self_decision_pick, threshold: 80, severity: low, owner: all}
+  - {id: R07, check: secret_pattern, threshold: 0, severity: high, owner: all}
+  - {id: R08, check: none, threshold: 0, severity: low, owner: all}
+  - {id: R09, check: none, threshold: 0, severity: low, owner: all}
+  - {id: R10, check: none, threshold: 0, severity: low, owner: all}
+  - {id: R11, check: none, threshold: 0, severity: low, owner: all}
+  - {id: R12, check: none, threshold: 0, severity: low, owner: all}
+  - {id: R13, check: none, threshold: 0, severity: low, owner: all}
+  - {id: R14, check: none, threshold: 0, severity: low, owner: all}
+  - {id: R15, check: none, threshold: 0, severity: low, owner: all}
+  - {id: R16, check: none, threshold: 0, severity: low, owner: all}
+  - {id: R17, check: github_issue_hygiene, threshold: 60, severity: medium, owner: balancer}
+  - {id: R18, check: none, threshold: 0, severity: low, owner: all}
+  - {id: R19, check: none, threshold: 0, severity: low, owner: all}
+  - {id: R20, check: none, threshold: 0, severity: low, owner: all}
+  - {id: R21, check: none, threshold: 0, severity: low, owner: all}
+  - {id: R22, check: none, threshold: 0, severity: low, owner: all}
+  - {id: R23, check: none, threshold: 0, severity: low, owner: all}
+  - {id: R24, check: none, threshold: 0, severity: low, owner: all}
+  - {id: R25, check: none, threshold: 0, severity: low, owner: all}
+  - {id: R26, check: none, threshold: 0, severity: low, owner: all}
+  - {id: R27, check: none, threshold: 0, severity: low, owner: all}
+  - {id: R28, check: none, threshold: 0, severity: low, owner: all}
+  - {id: R29, check: none, threshold: 0, severity: high, owner: all}
+  - {id: R30, check: none, threshold: 0, severity: low, owner: all}
