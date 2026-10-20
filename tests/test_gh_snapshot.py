@@ -173,3 +173,48 @@ class ToEpochTest(unittest.TestCase):
               "body": "Due: 2026-10-21", "created_at": "2026-10-20T00:00:00Z",
               "updated_at": "2026-10-20T01:00:00Z"}
         self.assertNotIn("last_editor", gs.row_of(it, "r"))
+
+
+class RedirectSafetyTest(unittest.TestCase):
+    """Samir follow-up: the Authorization header must not leak to another
+    host on a redirect (urllib forwards request headers by default)."""
+
+    def handler(self):
+        return gs.AuthSafeRedirectHandler()
+
+    def req(self):
+        import urllib.request
+        r = urllib.request.Request("https://api.github.com/repos/x")
+        r.add_header("Authorization", "Bearer secret-token")
+        return r
+
+    def test_cross_host_redirect_strips_auth(self):
+        import io
+        new = self.handler().redirect_request(self.req(), io.BytesIO(), 302, "Found", {},
+                                              "https://evil.example/hook")
+        self.assertNotIn("Authorization", new.headers)
+
+    def test_same_host_redirect_keeps_auth(self):
+        import io
+        new = self.handler().redirect_request(self.req(), io.BytesIO(), 302, "Found", {},
+                                              "https://api.github.com/repositories/1")
+        self.assertEqual(new.headers.get("Authorization"), "Bearer secret-token")
+
+
+class TokenOwnerTest(unittest.TestCase):
+    """Samir follow-up: the token file must be owned by root or the caller."""
+
+    def test_refuses_foreign_owned_token_file(self):
+        import os, stat, tempfile
+        from unittest import mock
+        tmp = tempfile.mkdtemp()
+        tok = os.path.join(tmp, "tok")
+        open(tok, "w").write("x")
+        os.chmod(tok, 0o600)
+        real = os.stat(tok)
+        fake = os.stat_result((real.st_mode, real.st_ino, real.st_dev, real.st_nlink,
+                               os.geteuid() + 1000, real.st_gid, real.st_size,
+                               real.st_atime, real.st_mtime, real.st_ctime))
+        with mock.patch("os.stat", return_value=fake):
+            with self.assertRaises(SystemExit):
+                gs.read_token({"GH_TOKEN_FILE": tok})
