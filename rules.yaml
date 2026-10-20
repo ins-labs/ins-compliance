@@ -30,3 +30,5 @@ rules:
   - {id: R28, check: none, threshold: 0, severity: low, owner: all}
   - {id: R29, check: none, threshold: 0, severity: high, owner: all}
   - {id: R30, check: none, threshold: 0, severity: low, owner: all}
+  - {id: R31, check: none, threshold: 0, severity: low, owner: all}
+  - {id: R32, check: none, threshold: 0, severity: medium, owner: all}

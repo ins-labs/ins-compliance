@@ -249,15 +249,17 @@ class RegistryLoginsTest(unittest.TestCase):
 
 
 class R17RulesFileTest(unittest.TestCase):
-    def test_r29_r30_manual_and_total_30(self):
+    def test_r29_r30_manual_and_total_32(self):
         import hashlib
         path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "rules.yaml")
         sha = hashlib.sha256(open(path, "rb").read()).hexdigest()
         rules = ck.load_rules(path, sha)
         out = ck.run(rules, [], now=NOW)
-        self.assertEqual(out["total_rules"], 30)
+        self.assertEqual(out["total_rules"], 32)
         self.assertIn("R29", out["no_script_check"])
         self.assertIn("R30", out["no_script_check"])
+        self.assertIn("R31", out["no_script_check"])
+        self.assertIn("R32", out["no_script_check"])
 
 
 class RegistryParseTest(unittest.TestCase):
@@ -288,9 +290,11 @@ class RulesYamlStrictTest(unittest.TestCase):
         path = pathlib.Path(__file__).resolve().parent.parent / "rules.yaml"
         doc = yaml.safe_load(path.read_text())
         ids = [r["id"] for r in doc["rules"]]
-        self.assertEqual(len(ids), 30)
+        self.assertEqual(len(ids), 32)
         self.assertIn("R29", ids)
         self.assertIn("R30", ids)
+        self.assertIn("R31", ids)
+        self.assertIn("R32", ids)
 
 
 class RegistryFailClosedTest(unittest.TestCase):

@@ -36,7 +36,7 @@ def test_late_secret_found():
     ev = [E("a1", 0, "agent", text="x" * 30000 + "ghp_" + "B" * 30)]
     assert len(c.secret_pattern(R["R07"], ev, N)) == 1
 def test_none_rules_counted():
-    out = c.run(list(R.values()), [], N); assert out["total_rules"] == 30 and len(out["no_script_check"]) == 24
+    out = c.run(list(R.values()), [], N); assert out["total_rules"] == 32 and len(out["no_script_check"]) == 26
 def test_parse_error_hard():
     import tempfile, hashlib
     p = tempfile.mktemp(); open(p, "w").write("rules:\n  - {id: R01, check: x}\n")
