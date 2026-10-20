@@ -201,6 +201,20 @@ class RedirectSafetyTest(unittest.TestCase):
                                               "https://api.github.com/repositories/1")
         self.assertEqual(new.headers.get("Authorization"), "Bearer secret-token")
 
+    def test_scheme_change_redirect_strips_auth(self):
+        # issue #9: origin compare (scheme+host+port), not hostname only -
+        # an https->http downgrade to the same host must not carry the token.
+        import io
+        new = self.handler().redirect_request(self.req(), io.BytesIO(), 302, "Found", {},
+                                              "http://api.github.com/repos/x")
+        self.assertNotIn("Authorization", new.headers)
+
+    def test_port_change_redirect_strips_auth(self):
+        import io
+        new = self.handler().redirect_request(self.req(), io.BytesIO(), 302, "Found", {},
+                                              "https://api.github.com:8443/repos/x")
+        self.assertNotIn("Authorization", new.headers)
+
 
 class TokenOwnerTest(unittest.TestCase):
     """Samir follow-up: the token file must be owned by root or the caller."""

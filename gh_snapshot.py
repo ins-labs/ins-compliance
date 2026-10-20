@@ -67,14 +67,17 @@ def read_token(env, var="GH_TOKEN_FILE"):
 
 class AuthSafeRedirectHandler(urllib.request.HTTPRedirectHandler):
     """urllib replays request headers across redirects; drop Authorization
-    when the redirect leaves the API host so the token cannot leak."""
+    when the redirect changes origin (scheme, host or port) so the token
+    cannot leak - a hostname-only compare misses https->http downgrades
+    and port changes (issue #9)."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         new = super().redirect_request(req, fp, code, msg, headers, newurl)
         if new is None:
             return None
         from urllib.parse import urlparse
-        if urlparse(new.full_url).hostname != urlparse(req.full_url).hostname:
+        origin = lambda u: (lambda p: (p.scheme, p.hostname, p.port))(urlparse(u))
+        if origin(new.full_url) != origin(req.full_url):
             new.headers.pop("Authorization", None)
         return new
 
