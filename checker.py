@@ -311,6 +311,24 @@ def _alarm(signum, frame):
     raise _Timeout()
 
 
+def feed_degraded_line(meta):
+    """Visible one-liner when the R17 GitHub feed is degraded (issue #7).
+    Report-only: never changes the verdict. Returns None when the feed is fine."""
+    if not isinstance(meta, dict):
+        return "R17 FEED DEGRADED: feed meta unreadable"
+    parts = []
+    proj = meta.get("project")
+    if proj and proj != "ok":
+        parts.append("project=%s" % proj)
+        if meta.get("project_error"):
+            parts.append("(%s)" % meta["project_error"])
+    if meta.get("editor_failed"):
+        parts.append("editor_failed=%s" % meta["editor_failed"])
+    if not parts:
+        return None
+    return "R17 FEED DEGRADED: " + " ".join(parts)
+
+
 def run(rules, ev, now=None, input_errors=0, gh_data=None, r17_baseline=False):
     now = now or time.time()
     errs = input_errors
@@ -437,5 +455,18 @@ def main():
         sys.exit(2)
 
 
+def feed_warn_cli(path):
+    try:
+        meta = json.load(open(path))
+    except Exception:
+        meta = None
+    line = feed_degraded_line(meta)
+    if line:
+        print(line, file=sys.stderr)
+
+
 if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "--feed-warn":
+        feed_warn_cli(sys.argv[2])
+        sys.exit(0)
     main()

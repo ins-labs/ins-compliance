@@ -423,6 +423,14 @@ class ProjectFieldsTest(unittest.TestCase):
         self.assertIsNone(r["due"])
         self.assertEqual(meta.get("project"), "no_token")
 
+    def test_project_error_keeps_class_status_no_body(self):
+        # issue #7: meta keeps the error class/status only - no response body.
+        http = self.http_with_project([])  # every graphql call fails
+        (_, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
+        self.assertEqual(meta.get("project"), "error")
+        self.assertEqual(meta.get("project_error"), "GhError status=500")
+        self.assertNotIn("bad graphql", meta.get("project_error", ""))
+
     def test_project_not_found(self):
         http = self.http_with_project(project_pages(project_title="something-else"))
         (rows, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
