@@ -16,7 +16,7 @@ rules:
   - {id: R14, check: none, threshold: 0, severity: low, owner: all}
   - {id: R15, check: none, threshold: 0, severity: low, owner: all}
   - {id: R16, check: none, threshold: 0, severity: low, owner: all}
-  - {id: R17, check: idle_unblocked_todo_min, threshold: 60, severity: medium, owner: balancer}
+  - {id: R17, check: github_issue_hygiene, threshold: 60, severity: medium, owner: balancer}
   - {id: R18, check: none, threshold: 0, severity: low, owner: all}
   - {id: R19, check: none, threshold: 0, severity: low, owner: all}
   - {id: R20, check: none, threshold: 0, severity: low, owner: all}
