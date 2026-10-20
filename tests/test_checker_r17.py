@@ -49,6 +49,15 @@ class R17Test(unittest.TestCase):
         f = flags([issue(updated=NOW - 25 * 3600)])
         self.assertTrue(any(x["id"] == "ins-infra:1" for x in f))
 
+    def test_v5_in_progress_case_insensitive(self):
+        f = flags([issue(updated=NOW - 61 * 60, status="In Progress")])
+        self.assertTrue(any(x["id"] == "ins-infra:1" for x in f))
+
+    def test_v5_todo_status_24h_window(self):
+        self.assertEqual(flags([issue(updated=NOW - 23 * 3600, status="Todo")]), [])
+        f = flags([issue(updated=NOW - 25 * 3600, status="Todo")])
+        self.assertTrue(any(x["id"] == "ins-infra:1" for x in f))
+
     def test_v5_skipped_when_blocked_marked(self):
         self.assertEqual(flags([issue(updated=NOW - 25 * 3600, blocked=[5], blocked_line=True, status="In progress")]), [])
 

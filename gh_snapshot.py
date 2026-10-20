@@ -13,6 +13,13 @@ never an exported env var (same rule as ins-infra #162). No text (title/body)
 is emitted, only ids and metadata. Any repo failure is collected and makes
 the exit status 1: a partial snapshot must never read as clean.
 
+Feed additions (issue #5): last_editor per issue (actor of the newest issue
+event or comment, falling back to the issue author), project fields
+Status/Due/Blocked-by from the org's "ins-work" project when a read:project
+token exists (GH_PROJECT_TOKEN_FILE), and native blocked-by links (REST issue
+dependencies) as the fallback when no project token is set. V5 silence windows:
+In progress = R17 threshold minutes, anything else (incl. Todo) = 24 h.
+
 Usage: gh_snapshot.py META_JSON [REPO ...] > issues.jsonl
 """
 import base64, calendar, json, os, re, stat, sys, time, urllib.error, urllib.request
@@ -34,22 +41,22 @@ class GhError(RuntimeError):
         self.payload = payload
 
 
-def read_token(env):
-    path = env.get("GH_TOKEN_FILE")
+def read_token(env, var="GH_TOKEN_FILE"):
+    path = env.get(var)
     if not path:
-        raise SystemExit("GH_TOKEN_FILE is required (path to a root-only 0600 read-only PAT file)")
+        raise SystemExit("%s is required (path to a root-only 0600 read-only PAT file)" % var)
     try:
         st = os.stat(path)
         mode = stat.S_IMODE(st.st_mode)
     except OSError:
-        raise SystemExit(f"GH_TOKEN_FILE {path} is not a regular file")
+        raise SystemExit(f"{var} {path} is not a regular file")
     if st.st_uid not in (0, os.geteuid()):
-        raise SystemExit("GH_TOKEN_FILE must be owned by root or the current user")
+        raise SystemExit(f"{var} must be owned by root or the current user")
     if mode not in ALLOWED_MODES:
-        raise SystemExit(f"GH_TOKEN_FILE has insecure permissions {mode:o} (allowed: 400/440/600/640)")
+        raise SystemExit(f"{var} has insecure permissions {mode:o} (allowed: 400/440/600/640)")
     token = open(path).read().strip()
     if not token:
-        raise SystemExit("GH_TOKEN_FILE is empty")
+        raise SystemExit(f"{var} is empty")
     return token
 
 
@@ -74,6 +81,23 @@ class Gh:
         if opener is None:
             opener = urllib.request.build_opener(AuthSafeRedirectHandler()).open
         self._open = opener
+
+    def graphql(self, query, variables=None):
+        body = json.dumps({"query": query, "variables": variables or {}}).encode()
+        headers = dict(self._headers, **{"Content-Type": "application/json"})
+        req = urllib.request.Request(self.api + "/graphql", data=body, headers=headers)
+        try:
+            with self._open(req, timeout=60) as r:
+                payload = json.loads(r.read() or b"{}")
+        except urllib.error.HTTPError as e:
+            try:
+                ep = json.loads(e.read() or b"{}")
+            except Exception:
+                ep = {}
+            raise GhError(e.code, ep) from None
+        if payload.get("errors"):
+            raise GhError(200, payload["errors"])
+        return payload
 
     def get(self, path):
         req = urllib.request.Request(self.api + path, headers=self._headers)
@@ -132,12 +156,15 @@ def agent_of(labels):
 def row_of(it, repo):
     labels = [l["name"] for l in it.get("labels", [])]
     blocked, blocked_line = parse_blocked(it.get("body") or "")
+    due = parse_due(it.get("body") or "")
     return {"repo": repo, "number": it["number"], "state": it["state"],
             "agent": agent_of(labels), "labels": labels,
             "assignees": [a["login"] for a in it.get("assignees", [])],
-            "due": parse_due(it.get("body") or ""),
+            "due": due, "due_source": "body" if due else None,
             "owner_hint": parse_owner(it.get("body") or ""),
             "blocked_by": blocked, "blocked_line_present": blocked_line,
+            "blocked_by_closed": [],
+            "status": None, "last_editor": None,
             "created_ts": to_epoch(it["created_at"]), "updated_ts": to_epoch(it["updated_at"])}
 
 
@@ -155,12 +182,113 @@ def list_paginated(gh, path):
             raise GhError(0, "pagination cap")
 
 
+def editor_of(gh, repo, number, issue, org=ORG):
+    """Actor of the newest issue event or comment; falls back to the author."""
+    best_ts, best = -1, None
+    events = list_paginated(gh, f"/repos/{org}/{repo}/issues/{number}/events")
+    comments = list_paginated(gh, f"/repos/{org}/{repo}/issues/{number}/comments")
+    for ev in events:
+        ts = to_epoch(ev["created_at"]) if ev.get("created_at") else 0
+        actor = (ev.get("actor") or {}).get("login")
+        if actor and ts >= best_ts:
+            best_ts, best = ts, actor
+    for c in comments:
+        ts = to_epoch(c["created_at"]) if c.get("created_at") else 0
+        actor = (c.get("user") or {}).get("login")
+        if actor and ts >= best_ts:
+            best_ts, best = ts, actor
+    if best is None:
+        best = (issue.get("user") or {}).get("login")
+    return best
+
+
+PROJECT_FIND_Q = """query($org:String!){organization(login:$org){projectsV2(first:50){nodes{id title}}}}"""
+PROJECT_ITEMS_Q = """query($id:ID!,$after:String){node(id:$id){... on ProjectV2{items(first:100,after:$after){
+nodes{content{... on Issue{number repository{name}}} fieldValues(first:20){nodes{
+... on ProjectV2ItemFieldSingleSelectValue{name field{... on ProjectV2FieldCommon{name}}}
+... on ProjectV2ItemFieldDateValue{date field{... on ProjectV2FieldCommon{name}}}
+... on ProjectV2ItemFieldIssueValue{issues(first:10){nodes{number state}} field{... on ProjectV2FieldCommon{name}}}
+}}} pageInfo{hasNextPage endCursor}}}}}"""
+PROJECT_TITLE = "ins-work"
+
+
+def project_fields(pg, org=ORG):
+    """ins-work project -> {(repo, number): {status, due, blocked: [(num, state)]}}.
+    Returns None when the project is not found."""
+    data = pg.graphql(PROJECT_FIND_Q, {"org": org})
+    nodes = (((data.get("data") or {}).get("organization") or {}).get("projectsV2") or {}).get("nodes") or []
+    pid = None
+    for n in nodes:
+        if (n.get("title") or "").strip().lower() == PROJECT_TITLE:
+            pid = n.get("id")
+            break
+    if not pid:
+        return None
+    out, after = {}, None
+    while True:
+        data = pg.graphql(PROJECT_ITEMS_Q, {"id": pid, "after": after})
+        items = ((data.get("data") or {}).get("node") or {}).get("items") or {}
+        for node in items.get("nodes") or []:
+            content = node.get("content") or {}
+            repo = (content.get("repository") or {}).get("name")
+            number = content.get("number")
+            if not repo or number is None:
+                continue  # draft items and non-issue cards carry no hygiene data
+            status, due, blocked = None, None, []
+            for fv in (node.get("fieldValues") or {}).get("nodes") or []:
+                fname = ((fv.get("field") or {}).get("name") or "").strip().lower()
+                if fname == "status" and fv.get("name"):
+                    status = fv["name"]
+                elif fname == "due" and fv.get("date"):
+                    due = fv["date"]
+                elif fname == "blocked by":
+                    if fv.get("issues"):
+                        blocked += [(i["number"], (i.get("state") or "").lower())
+                                    for i in (fv["issues"].get("nodes") or []) if i.get("number")]
+                    elif fv.get("issue"):
+                        i = fv["issue"]
+                        blocked.append((i["number"], (i.get("state") or "").lower()))
+            out[(repo, number)] = {"status": status, "due": due, "blocked": blocked}
+        page = items.get("pageInfo") or {}
+        if not page.get("hasNextPage") or not page.get("endCursor"):
+            return out
+        after = page.get("endCursor")
+
+
+def apply_blocked(row, native):
+    """Merge native blocked-by links [(num, state)] into a snapshot row."""
+    if not native:
+        return
+    have = set(row["blocked_by"])
+    for num, state in native:
+        if num not in have:
+            row["blocked_by"].append(num)
+            have.add(num)
+        if state == "closed" and num not in row["blocked_by_closed"]:
+            row["blocked_by_closed"].append(num)
+    row["blocked_by"].sort()
+    row["blocked_line_present"] = True
+    row.setdefault("_native", set()).update(n for n, _ in native)
+
+
 def snapshot(env=None, repos=None, org=ORG, opener=None, gh=None):
     env = os.environ if env is None else env
     gh = gh or Gh(read_token(env), opener=opener)
     if repos is None:
         repos = [r["name"] for r in list_paginated(gh, f"/orgs/{org}/repos")]
+    # Project fields (Status/Due/Blocked-by) only when the read:project token
+    # exists; the snapshot stays honest without it (status None, meta says why).
+    pfields, project_state = None, "no_token"
+    if env.get("GH_PROJECT_TOKEN_FILE"):
+        try:
+            pg = Gh(read_token(env, "GH_PROJECT_TOKEN_FILE"), opener=opener)
+            pfields = project_fields(pg, org)
+            project_state = "ok" if pfields is not None else "not_found"
+        except GhError:
+            pfields, project_state = None, "error"
     rows, prs, failed = [], [], []
+    editor_failed = 0
+    blocked_native = "project" if pfields is not None else "rest"
     for repo in repos:
         try:
             items = list_paginated(gh, f"/repos/{org}/{repo}/issues?state=open")
@@ -168,6 +296,7 @@ def snapshot(env=None, repos=None, org=ORG, opener=None, gh=None):
             failed.append(repo)
             continue
         open_numbers = set()
+        by_number = {}
         for it in items:
             if "pull_request" in it:
                 body = it.get("body") or ""
@@ -177,15 +306,41 @@ def snapshot(env=None, repos=None, org=ORG, opener=None, gh=None):
                             "has_issue_ref": bool(LINKED_ISSUE_RE.search(body)),
                             "updated_ts": to_epoch(it["updated_at"])})
                 continue
-            rows.append(row_of(it, repo))
+            row = row_of(it, repo)
+            rows.append(row)
+            by_number[it["number"]] = (row, it)
             open_numbers.add(it["number"])
-        # V6 support: resolve the state of referenced blockers not in the open set
+        # V10 feed: editor of last update (newest event or comment wins)
+        for number, (row, it) in by_number.items():
+            try:
+                row["last_editor"] = editor_of(gh, repo, number, it, org)
+            except GhError:
+                editor_failed += 1
+        # Project fields + blocked-by links
+        for number, (row, it) in by_number.items():
+            if pfields is not None:
+                pf = pfields.get((repo, number))
+                if pf:
+                    row["status"] = pf["status"]
+                    if not row["due"] and pf["due"]:
+                        row["due"], row["due_source"] = pf["due"], "project"
+                    apply_blocked(row, pf["blocked"])
+            elif blocked_native == "rest":
+                try:
+                    deps = list_paginated(gh, f"/repos/{org}/{repo}/issues/{number}/dependencies/blocked_by")
+                    apply_blocked(row, [(d["number"], (d.get("state") or "").lower())
+                                        for d in deps if d.get("number")])
+                except GhError:
+                    blocked_native = "unsupported"  # circuit break: one probe, then stop
+        # V6 support: resolve the state of referenced blockers not in the open
+        # set and not already classified by native/project links
         for row in rows:
             if row["repo"] != repo:
                 continue
-            closed = []
+            closed = list(row["blocked_by_closed"])
+            known = set(closed) | row.get("_native", set())
             for n in row["blocked_by"]:
-                if n in open_numbers:
+                if n in open_numbers or n in known:
                     continue
                 try:
                     one = gh.get(f"/repos/{org}/{repo}/issues/{n}")
@@ -195,9 +350,12 @@ def snapshot(env=None, repos=None, org=ORG, opener=None, gh=None):
                 if st == "closed":
                     closed.append(n)
             row["blocked_by_closed"] = closed
+            row.pop("_native", None)
     rows.sort(key=lambda r: (r["repo"], r["number"]))
     meta = {"repos_failed": failed, "repos_ok": [r for r in repos if r not in failed],
-            "issues_seen": len(rows), "prs_seen": len(prs)}
+            "issues_seen": len(rows), "prs_seen": len(prs),
+            "project": project_state, "blocked_native": blocked_native,
+            "editor_failed": editor_failed}
     return (rows, prs), meta
 
 

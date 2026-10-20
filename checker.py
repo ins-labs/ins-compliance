@@ -176,7 +176,7 @@ def github_issue_hygiene(rule, gh_data, now, baseline=False):
                 flag(ident, 3)  # unparseable due = no usable due
         if not it.get("blocked_line_present"):
             silent_min = (now - it["updated_ts"]) / 60
-            window = n_min if it.get("status") == "In progress" else 24 * 60
+            window = n_min if (it.get("status") or "").strip().lower() == "in progress" else 24 * 60
             if silent_min > window:
                 flag(ident, 5, silent_min)
         else:

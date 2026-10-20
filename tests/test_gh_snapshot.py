@@ -64,7 +64,8 @@ class SnapshotTest(unittest.TestCase):
         self.env = {"GH_TOKEN_FILE": self.tok}
 
     def test_maps_issues_and_skips_prs(self):
-        http = FakeHTTP({"/issues": [issue(), issue(number=6, pull_request={"url": "x"}), issue(number=7, labels=[])]})
+        http = FakeHTTP({"/events": [], "/comments": [], "/dependencies": [],
+                    "/issues": [issue(), issue(number=6, pull_request={"url": "x"}), issue(number=7, labels=[])]})
         (rows, prs), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
         self.assertEqual([r["number"] for r in rows], [5, 7])
         a = rows[0]
@@ -79,7 +80,7 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(meta["repos_failed"], [])
 
     def test_missing_due_and_blockers(self):
-        http = FakeHTTP({"/issues": [issue(body="no meta here")]})
+        http = FakeHTTP({"/events": [], "/comments": [], "/dependencies": [], "/issues": [issue(body="no meta here")]})
         (rows, _), _ = gs.snapshot(env=self.env, repos=["r"], opener=http)
         self.assertIsNone(rows[0]["due"])
         self.assertEqual(rows[0]["blocked_by"], [])
@@ -95,12 +96,12 @@ class SnapshotTest(unittest.TestCase):
             gs.snapshot(env=self.env, repos=["r"], opener=FakeHTTP({}))
 
     def test_due_only_from_first_line(self):
-        http = FakeHTTP({"/issues": [issue(body="intro\nDue: 2026-10-22\n")]})
+        http = FakeHTTP({"/events": [], "/comments": [], "/dependencies": [], "/issues": [issue(body="intro\nDue: 2026-10-22\n")]})
         (rows, _), _ = gs.snapshot(env=self.env, repos=["r"], opener=http)
         self.assertIsNone(rows[0]["due"])
 
     def test_blocked_by_variants(self):
-        http = FakeHTTP({"/issues": [issue(body="Due: 2026-10-21\nBlocked by #12, #13 and owner/repo#14") ]})
+        http = FakeHTTP({"/events": [], "/comments": [], "/dependencies": [], "/issues": [issue(body="Due: 2026-10-21\nBlocked by #12, #13 and owner/repo#14") ]})
         (rows, _), _ = gs.snapshot(env=self.env, repos=["r"], opener=http)
         self.assertEqual(rows[0]["blocked_by"], [12, 13])
 
@@ -167,12 +168,12 @@ class ToEpochTest(unittest.TestCase):
                 os.environ["TZ"] = old
             time.tzset()
 
-    def test_rows_do_not_emit_last_editor_yet(self):
-        # V10 stays silent until the feed captures editor data (documented).
+    def test_row_defaults_last_editor_none(self):
+        # row_of is pure mapping; the snapshot pass fills last_editor.
         it = {"number": 5, "state": "open", "labels": [], "assignees": [],
               "body": "Due: 2026-10-21", "created_at": "2026-10-20T00:00:00Z",
               "updated_at": "2026-10-20T01:00:00Z"}
-        self.assertNotIn("last_editor", gs.row_of(it, "r"))
+        self.assertIsNone(gs.row_of(it, "r")["last_editor"])
 
 
 class RedirectSafetyTest(unittest.TestCase):
@@ -218,3 +219,199 @@ class TokenOwnerTest(unittest.TestCase):
         with mock.patch("os.stat", return_value=fake):
             with self.assertRaises(SystemExit):
                 gs.read_token({"GH_TOKEN_FILE": tok})
+
+
+class LastEditorTest(unittest.TestCase):
+    """V10 feed: last editor of an issue = actor of the newest issue event or
+    comment; falls back to the issue author; per-issue failures are tolerated."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self.tok = os.path.join(self.tmp, "tok")
+        with open(self.tok, "w") as fh:
+            fh.write(TOKEN)
+        os.chmod(self.tok, 0o600)
+        self.env = {"GH_TOKEN_FILE": self.tok}
+
+    def test_editor_from_newest_comment(self):
+        pages = {
+            "/issues/5/events": [{"created_at": "2026-10-19T10:00:00Z", "event": "labeled",
+                                   "actor": {"login": "ins-dina"}}],
+            "/issues/5/comments": [{"created_at": "2026-10-20T09:00:00Z",
+                                     "user": {"login": "ins-wazen"}}],
+            "/issues/5/dependencies": [],
+            "/issues": [issue()],
+        }
+        http = FakeHTTP(pages)
+        (rows, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
+        self.assertEqual(rows[0]["last_editor"], "ins-wazen")
+        self.assertEqual(meta.get("editor_failed", 0), 0)
+
+    def test_editor_from_newest_event(self):
+        pages = {
+            "/issues/5/events": [{"created_at": "2026-10-20T10:00:00Z", "event": "assigned",
+                                   "actor": {"login": "ins-dina"}}],
+            "/issues/5/comments": [{"created_at": "2026-10-19T09:00:00Z",
+                                     "user": {"login": "ins-wazen"}}],
+            "/issues/5/dependencies": [],
+            "/issues": [issue()],
+        }
+        (rows, _), _ = gs.snapshot(env=self.env, repos=["r"], opener=FakeHTTP(pages))
+        self.assertEqual(rows[0]["last_editor"], "ins-dina")
+
+    def test_editor_falls_back_to_author(self):
+        pages = {
+            "/issues/5/events": [],
+            "/issues/5/comments": [],
+            "/issues/5/dependencies": [],
+            "/issues": [issue(user={"login": "ins-sherbeeny"})],
+        }
+        (rows, _), _ = gs.snapshot(env=self.env, repos=["r"], opener=FakeHTTP(pages))
+        self.assertEqual(rows[0]["last_editor"], "ins-sherbeeny")
+
+    def test_editor_failure_tolerated(self):
+        pages = {"/issues/5/dependencies": [], "/issues": [issue()]}
+        http = FakeHTTP(pages, fail_paths=["/events", "/comments"])
+        (rows, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
+        self.assertIsNone(rows[0]["last_editor"])
+        self.assertEqual(meta["editor_failed"], 1)
+
+
+class NativeBlockedByTest(unittest.TestCase):
+    """Blocked-by links: native issue dependencies via REST when the project
+    token is absent. Merged into blocked_by; closed states resolve directly."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self.tok = os.path.join(self.tmp, "tok")
+        with open(self.tok, "w") as fh:
+            fh.write(TOKEN)
+        os.chmod(self.tok, 0o600)
+        self.env = {"GH_TOKEN_FILE": self.tok}
+
+    def test_native_links_merge_and_close(self):
+        pages = {
+            "/issues/5/dependencies/blocked_by": [
+                {"number": 12, "state": "open"}, {"number": 44, "state": "closed"}],
+            "/issues/5/events": [], "/issues/5/comments": [],
+            "/issues": [issue(body="Due: 2026-10-21")],
+        }
+        (rows, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=FakeHTTP(pages))
+        r = rows[0]
+        self.assertEqual(r["blocked_by"], [12, 44])
+        self.assertEqual(r["blocked_by_closed"], [44])
+        self.assertTrue(r["blocked_line_present"])
+        self.assertEqual(meta.get("blocked_native"), "rest")
+
+    def test_native_unsupported_circuit_break(self):
+        pages = {"/issues/5/events": [], "/issues/5/comments": [],
+                 "/issues": [issue(number=5), issue(number=6)]}
+        http = FakeHTTP(pages, fail_paths=["/dependencies"])
+        (rows, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
+        self.assertEqual(meta.get("blocked_native"), "unsupported")
+        # circuit break: at most one dependencies call
+        self.assertEqual(len([u for u in http.urls if "/dependencies/" in u]), 1)
+
+    def test_body_and_native_union(self):
+        pages = {
+            "/issues/5/dependencies/blocked_by": [{"number": 13, "state": "open"}],
+            "/issues/5/events": [], "/issues/5/comments": [],
+            "/issues/12": {"number": 12, "state": "closed"},
+            "/issues": [issue(body="Due: 2026-10-21\nBlocked by #12")],
+        }
+        (rows, _), _ = gs.snapshot(env=self.env, repos=["r"], opener=FakeHTTP(pages))
+        r = rows[0]
+        self.assertEqual(r["blocked_by"], [12, 13])
+        self.assertEqual(r["blocked_by_closed"], [12])
+
+
+PROJECT_ITEM = {"content": {"number": 5, "repository": {"name": "r"}},
+                "fieldValues": {"nodes": [
+                    {"name": "In progress", "field": {"name": "Status"}},
+                    {"date": "2026-10-22", "field": {"name": "Due"}},
+                    {"issues": {"nodes": [{"number": 31, "state": "OPEN"},
+                                           {"number": 32, "state": "CLOSED"}]},
+                     "field": {"name": "Blocked by"}}]}}
+
+
+def project_pages(item=None, project_title="ins-work"):
+    """Fake GraphQL responses: first call finds the project, second lists items."""
+    item = PROJECT_ITEM if item is None else item
+    return [("organization", {"data": {"organization": {"projectsV2": {"nodes": [
+                {"id": "P1", "title": project_title}]}}}}),
+            ("items", {"data": {"node": {"items": {
+                "nodes": [item], "pageInfo": {"hasNextPage": False, "endCursor": None}}}}})]
+
+
+class ProjectFieldsTest(unittest.TestCase):
+    """ins-work project fields (Status/Due/Blocked by) merge into rows when the
+    read:project token exists; without it every project field stays None."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self.tok = os.path.join(self.tmp, "tok")
+        with open(self.tok, "w") as fh:
+            fh.write(TOKEN)
+        os.chmod(self.tok, 0o600)
+        self.ptok = os.path.join(self.tmp, "ptok")
+        with open(self.ptok, "w") as fh:
+            fh.write(TOKEN + "_project")
+        os.chmod(self.ptok, 0o600)
+        self.env = {"GH_TOKEN_FILE": self.tok, "GH_PROJECT_TOKEN_FILE": self.ptok}
+
+    def http_with_project(self, gql_pages):
+        base = {"/issues/5/events": [], "/issues/5/comments": [],
+                "/issues": [issue(body="no due here")]}
+
+        class GqlHTTP(FakeHTTP):
+            def __call__(self, req, timeout=0):
+                if req.full_url.endswith("/graphql"):
+                    body = json.loads(req.data or b"{}")
+                    q = body.get("query", "")
+                    for marker, payload in gql_pages:
+                        if marker in q:
+                            return self.R(payload)
+                    raise gs.GhError(500, {"message": "bad graphql"})
+                return super().__call__(req, timeout=timeout)
+        return GqlHTTP(base)
+
+    def test_project_fields_merge(self):
+        http = self.http_with_project(project_pages())
+        (rows, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
+        r = rows[0]
+        self.assertEqual(r["status"], "In progress")
+        self.assertEqual(r["due"], "2026-10-22")       # project Due fills the gap
+        self.assertEqual(r["due_source"], "project")
+        self.assertEqual(r["blocked_by"], [31, 32])
+        self.assertEqual(r["blocked_by_closed"], [32])
+        self.assertTrue(r["blocked_line_present"])
+        self.assertEqual(meta.get("project"), "ok")
+        self.assertEqual(meta.get("blocked_native"), "project")
+
+    def test_body_due_wins_over_project(self):
+        http = self.http_with_project(project_pages())
+        base_issue = issue()  # has body Due: 2026-10-21
+        http.pages["/issues"] = [base_issue]
+        (rows, _), _ = gs.snapshot(env=self.env, repos=["r"], opener=http)
+        self.assertEqual(rows[0]["due"], "2026-10-21")
+        self.assertEqual(rows[0]["due_source"], "body")
+
+    def test_no_project_token_skips(self):
+        env = {"GH_TOKEN_FILE": self.tok}
+        pages = {"/issues/5/dependencies/blocked_by": [],
+                 "/issues/5/events": [], "/issues/5/comments": [],
+                 "/issues": [issue(body="no due here")]}
+        (rows, _), meta = gs.snapshot(env=env, repos=["r"], opener=FakeHTTP(pages))
+        r = rows[0]
+        self.assertIsNone(r["status"])
+        self.assertIsNone(r["due"])
+        self.assertEqual(meta.get("project"), "no_token")
+
+    def test_project_not_found(self):
+        http = self.http_with_project(project_pages(project_title="something-else"))
+        (rows, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
+        self.assertEqual(meta.get("project"), "not_found")
+        self.assertIsNone(rows[0]["status"])
