@@ -214,7 +214,10 @@ def github_issue_hygiene(rule, gh_data, now, baseline=False):
             if silent_min > window:
                 flag(ident, 5, silent_min)
         else:
-            if not it.get("blocked_by"):
+            # cross-repo links count as blockers too (Amen+Samir PR #6):
+            # a cross-only blocker is blocked, and closed states come from
+            # blocked_by_closed (qualified ids for cross-repo).
+            if not (it.get("blocked_by") or it.get("blocked_by_cross")):
                 flag(ident, 6)
             elif it.get("blocked_by_closed"):
                 flag(ident, 6)

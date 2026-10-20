@@ -69,6 +69,19 @@ class R17Test(unittest.TestCase):
         f = flags([issue(blocked=[5], blocked_line=True, closed=[5])])
         self.assertTrue(any(x["id"] == "ins-infra:1" for x in f))
 
+    def test_v6_cross_repo_open_blocker_clean(self):
+        it = issue(blocked=(), blocked_line=True)
+        it["blocked_by_cross"] = ["b#5"]
+        it["blocked_by_closed"] = []
+        self.assertEqual(flags([it]), [])
+
+    def test_v6_cross_repo_closed_blocker_flagged(self):
+        it = issue(blocked=(), blocked_line=True)
+        it["blocked_by_cross"] = ["b#5"]
+        it["blocked_by_closed"] = ["b#5"]
+        f = flags([it])
+        self.assertTrue(any(x["id"] == "ins-infra:1" for x in f))
+
     def test_v7_idle_agent_with_unassigned_work(self):
         f = flags([issue(agent=None, number=9)], reg=REG)  # unassigned exists; karim/dina/wazen have zero
         self.assertTrue(any(x["id"] == "karim" for x in f))
