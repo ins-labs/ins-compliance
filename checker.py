@@ -462,7 +462,7 @@ def feed_warn_cli(path):
         meta = None
     line = feed_degraded_line(meta)
     if line:
-        print(line, file=sys.stderr)
+        print(line)  # stdout, before the verdict: stderr can be invisible to cron capture (Amen PR #15)
 
 
 if __name__ == "__main__":

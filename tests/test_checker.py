@@ -57,7 +57,7 @@ def test_feed_warn_cli_prints_visible_line():
     f = tempfile.mktemp()
     open(f, "w").write(J.dumps({"project": "error", "project_error": "GhError status=403", "editor_failed": 1}))
     r = subprocess.run(["python3", CHECKER, "--feed-warn", f], capture_output=True, text=True)
-    assert r.returncode == 0 and "R17 FEED DEGRADED" in r.stderr and "project=error" in r.stderr
+    assert r.returncode == 0 and "R17 FEED DEGRADED" in r.stdout and "project=error" in r.stdout and r.stderr == ""
 
 def test_parse_error_hard():
     import tempfile, hashlib
