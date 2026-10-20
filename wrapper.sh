@@ -15,7 +15,7 @@ if [ -n "${GH_TOKEN_FILE:-}" ]; then
   python3 "$BASE/gh_snapshot.py" "$DIR/ghmeta.json" ${GH_SNAPSHOT_REPOS:-} >"$DIR/issues.jsonl" || { echo "RULE CHECK FAILED: snapshot error (not clean)"; exit 1; }
   REG="${GH_REGISTRY:-$BASE/registry/agents.yaml}"
   [ -f "$REG" ] || { echo "RULE CHECK FAILED: registry unreadable (not clean)"; exit 1; }
-  GH_ARGS="$DIR/issues.jsonl $REG"
+  GH_ARGS="$DIR/issues.jsonl $REG $DIR/ghmeta.json"
 fi
 OUT=$(python3 "$BASE/checker.py" "$1" "$2" "$DIR/ev.jsonl" "$DIR/meta.json" $GH_ARGS 2>/dev/null); RC2=$?
 if [ $RC2 -eq 2 ]; then echo "RULE CHECK FAILED: no events (not clean)"; exit 1; fi

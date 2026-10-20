@@ -19,7 +19,8 @@ LLM-free rule checker. Read-only. Rules: rules.yaml (id, check, threshold, sever
 - Manual rules: R29 (no Docker images) and R30 (Mokalem wording) are `check: none` - listed as manual (`no_script_check`), never auto-measured.
 - First run: `R17_BASELINE=1` prints a counts line (`r17_baseline`) and flags nothing; per-issue flags start after the announced grooming switch.
 - The violation number (V1..V9) is carried in the flag's `count` field.
-- Project-field inputs (Status/Due/Blocked by from the ins-work project) land when the read:project token exists; the snapshot then carries `status` per issue.
+- Project-field inputs (Status/Due from the ins-work project) land when the read:project token exists; the snapshot then carries `status` per issue.
+- Feed fields per issue row: repo, number, state, agent, labels, assignees, due, due_source (body|project), owner_hint, blocked_by (same-repo numbers, from the body `Blocked by` line and native links), blocked_by_cross (native cross-repo links as qualified `repo#n` / `owner/repo#n` ids; states read in the right repo), blocked_line_present, blocked_by_closed (closed blockers: same-repo numbers and qualified cross-repo ids, re-read every run), status (project Status), last_editor / last_editor_type / last_editor_trailer (V10), created_ts, updated_ts.
 
 ## Known limits
 - Secret regexes catch known token shapes only; the Telegram-token pattern uses \b and misses tokens glued to word characters.
