@@ -1,5 +1,5 @@
 """Tests for gh_snapshot.py (R17 GitHub issues feed). No network: fake opener."""
-import importlib, json, os, sys, unittest
+import importlib, json, os, re, sys, unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 gs = importlib.import_module("gh_snapshot")
@@ -11,7 +11,7 @@ class FakeHTTP:
     """Serves canned GitHub API pages keyed by (path-without-host)."""
     def __init__(self, pages, fail_paths=()):
         self.pages = pages
-        self.fail_paths = fail_paths
+        self.fail_paths = dict.fromkeys(fail_paths, 500) if not isinstance(fail_paths, dict) else fail_paths
         self.urls = []
 
     class R:
@@ -30,9 +30,9 @@ class FakeHTTP:
         url = req.full_url
         self.urls.append(url)
         path = url.split("api.github.com", 1)[1]
-        for fp in self.fail_paths:
+        for fp, status in self.fail_paths.items():
             if fp in path:
-                raise gs.GhError(500, {"message": "boom"})
+                raise gs.GhError(status, {"message": "boom"})
         for prefix, payload in self.pages.items():
             if prefix in path:
                 return self.R(payload)
@@ -305,14 +305,25 @@ class NativeBlockedByTest(unittest.TestCase):
         self.assertTrue(r["blocked_line_present"])
         self.assertEqual(meta.get("blocked_native"), "rest")
 
-    def test_native_unsupported_circuit_break(self):
+    def test_native_404_trips_circuit_break(self):
         pages = {"/issues/5/events": [], "/issues/5/comments": [],
+                 "/issues/6/events": [], "/issues/6/comments": [],
                  "/issues": [issue(number=5), issue(number=6)]}
-        http = FakeHTTP(pages, fail_paths=["/dependencies"])
+        http = FakeHTTP(pages, fail_paths={"/dependencies": 404})
         (rows, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
         self.assertEqual(meta.get("blocked_native"), "unsupported")
-        # circuit break: at most one dependencies call
         self.assertEqual(len([u for u in http.urls if "/dependencies/" in u]), 1)
+
+    def test_transient_5xx_does_not_trip_breaker(self):
+        pages = {"/issues/5/events": [], "/issues/5/comments": [],
+                 "/issues/6/events": [], "/issues/6/comments": [],
+                 "/issues/6/dependencies/blocked_by": [{"number": 9, "state": "open"}],
+                 "/issues": [issue(number=5), issue(number=6)]}
+        http = FakeHTTP(pages, fail_paths={"/issues/5/dependencies": 500})
+        (rows, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
+        self.assertEqual(meta.get("blocked_native"), "rest")
+        self.assertEqual(meta.get("deps_failed"), 1)
+        self.assertEqual(rows[1]["blocked_by"], [9, 12])  # issue 6 still probed (body ref 12 + native 9)
 
     def test_body_and_native_union(self):
         pages = {
@@ -330,10 +341,7 @@ class NativeBlockedByTest(unittest.TestCase):
 PROJECT_ITEM = {"content": {"number": 5, "repository": {"name": "r"}},
                 "fieldValues": {"nodes": [
                     {"name": "In progress", "field": {"name": "Status"}},
-                    {"date": "2026-10-22", "field": {"name": "Due"}},
-                    {"issues": {"nodes": [{"number": 31, "state": "OPEN"},
-                                           {"number": 32, "state": "CLOSED"}]},
-                     "field": {"name": "Blocked by"}}]}}
+                    {"date": "2026-10-22", "field": {"name": "Due"}}]}}
 
 
 def project_pages(item=None, project_title="ins-work"):
@@ -364,6 +372,8 @@ class ProjectFieldsTest(unittest.TestCase):
 
     def http_with_project(self, gql_pages):
         base = {"/issues/5/events": [], "/issues/5/comments": [],
+                "/issues/5/dependencies/blocked_by": [{"number": 31, "state": "open"},
+                                                      {"number": 32, "state": "closed"}],
                 "/issues": [issue(body="no due here")]}
 
         class GqlHTTP(FakeHTTP):
@@ -385,11 +395,11 @@ class ProjectFieldsTest(unittest.TestCase):
         self.assertEqual(r["status"], "In progress")
         self.assertEqual(r["due"], "2026-10-22")       # project Due fills the gap
         self.assertEqual(r["due_source"], "project")
-        self.assertEqual(r["blocked_by"], [31, 32])
+        self.assertEqual(r["blocked_by"], [31, 32])   # from REST links, not the project
         self.assertEqual(r["blocked_by_closed"], [32])
         self.assertTrue(r["blocked_line_present"])
         self.assertEqual(meta.get("project"), "ok")
-        self.assertEqual(meta.get("blocked_native"), "project")
+        self.assertEqual(meta.get("blocked_native"), "rest")
 
     def test_body_due_wins_over_project(self):
         http = self.http_with_project(project_pages())
@@ -415,3 +425,153 @@ class ProjectFieldsTest(unittest.TestCase):
         (rows, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
         self.assertEqual(meta.get("project"), "not_found")
         self.assertIsNone(rows[0]["status"])
+
+
+class GraphqlSchemaTest(unittest.TestCase):
+    """Samir PR #6: both query strings must reference only types/fields that
+    exist in the pinned schema excerpt (the IssueValue bug class)."""
+
+    SCHEMA = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                          "graphql_schema_pinned.json")))
+
+    def check(self, query):
+        q = re.sub(r"\([^()]*\)", "", query)  # strip argument lists
+        types = set(re.findall(r"\.\.\. on (\w+)", q))
+        self.assertNotIn("ProjectV2ItemFieldIssueValue", types)
+        for t in types:
+            self.assertIn(t, self.SCHEMA["types"], "unknown type %s" % t)
+        words = set(re.findall(r"[A-Za-z]\w+", q))
+        words -= types
+        words -= {"query", "on"}                       # keywords
+        words -= {"org", "id", "after"}                # variable names
+        words -= {"String", "ID"}                      # variable types
+        for w in words:
+            self.assertIn(w, self.SCHEMA["fields"], "unknown field %s" % w)
+
+    def test_find_query_against_pinned_schema(self):
+        self.check(gs.PROJECT_FIND_Q)
+
+    def test_items_query_against_pinned_schema(self):
+        self.check(gs.PROJECT_ITEMS_Q)
+
+
+class SnapshotCacheTest(unittest.TestCase):
+    """Samir PR #6: editor/dependency calls are cached by issue updated_ts;
+    only issues changed since the last snapshot cost API calls."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self.tok = os.path.join(self.tmp, "tok")
+        with open(self.tok, "w") as fh:
+            fh.write(TOKEN)
+        os.chmod(self.tok, 0o600)
+        self.state = os.path.join(self.tmp, "state.json")
+        self.env = {"GH_TOKEN_FILE": self.tok, "GH_SNAPSHOT_STATE": self.state}
+
+    def pages(self):
+        return {"/issues/5/events": [{"created_at": "2026-10-20T10:00:00Z", "event": "labeled",
+                                       "actor": {"login": "ins-dina"}}],
+                "/issues/5/comments": [],
+                "/issues/5/dependencies/blocked_by": [{"number": 31, "state": "open"}],
+                "/issues": [issue()]}
+
+    def test_first_run_fetches_and_writes_cache(self):
+        http = FakeHTTP(self.pages())
+        (rows, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
+        self.assertEqual(meta["editor_cached"], 0)
+        self.assertEqual(meta["deps_cached"], 0)
+        cache = json.load(open(self.state))
+        self.assertEqual(cache["r:5"]["last_editor"], "ins-dina")
+        self.assertEqual(cache["r:5"]["deps"], [[31, "open"]])
+        import stat
+        self.assertEqual(stat.S_IMODE(os.stat(self.state).st_mode), 0o600)
+
+    def test_second_run_uses_cache(self):
+        gs.snapshot(env=self.env, repos=["r"], opener=FakeHTTP(self.pages()))
+        http2 = FakeHTTP(self.pages())
+        (rows, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http2)
+        self.assertEqual(meta["editor_cached"], 1)
+        self.assertEqual(meta["deps_cached"], 1)
+        self.assertEqual([u for u in http2.urls if "/events" in u or "/dependencies/" in u], [])
+        self.assertEqual(rows[0]["last_editor"], "ins-dina")
+        self.assertEqual(rows[0]["blocked_by"], [12, 31])
+
+    def test_changed_issue_refetches(self):
+        gs.snapshot(env=self.env, repos=["r"], opener=FakeHTTP(self.pages()))
+        p = self.pages()
+        p["/issues"] = [issue(updated_at="2026-10-20T11:00:00Z")]
+        http2 = FakeHTTP(p)
+        (_, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http2)
+        self.assertEqual(meta["editor_cached"], 0)
+        self.assertEqual(meta["deps_cached"], 0)
+
+    def test_missing_state_file_is_cold_cache(self):
+        env = {"GH_TOKEN_FILE": self.tok, "GH_SNAPSHOT_STATE": os.path.join(self.tmp, "nope.json")}
+        (_, _), meta = gs.snapshot(env=env, repos=["r"], opener=FakeHTTP(self.pages()))
+        self.assertEqual(meta["editor_cached"], 0)
+
+
+class TrailerTest(unittest.TestCase):
+    """V10 attribution (Dina): a newest commit-reference event yields the
+    Co-authored-by/Owner trailer from that commit's message."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self.tok = os.path.join(self.tmp, "tok")
+        with open(self.tok, "w") as fh:
+            fh.write(TOKEN)
+        os.chmod(self.tok, 0o600)
+        self.env = {"GH_TOKEN_FILE": self.tok}
+
+    def test_trailer_from_newest_commit_reference(self):
+        pages = {"/issues/5/events": [{"created_at": "2026-10-20T10:00:00Z", "event": "referenced",
+                                        "actor": {"login": "ins-sherbeeny"}, "commit_id": "abc123"}],
+                 "/issues/5/comments": [],
+                 "/issues/5/dependencies": [],
+                 "/commits/abc123": {"commit": {"message": "Fix thing\n\nCo-authored-by: dina <d@x>"}},
+                 "/issues": [issue()]}
+        (rows, _), _ = gs.snapshot(env=self.env, repos=["r"], opener=FakeHTTP(pages))
+        self.assertEqual(rows[0]["last_editor"], "ins-sherbeeny")
+        self.assertEqual(rows[0]["last_editor_trailer"], "dina")
+
+    def test_owner_trailer_variant(self):
+        pages = {"/issues/5/events": [{"created_at": "2026-10-20T10:00:00Z", "event": "closed",
+                                        "actor": {"login": "ins-sherbeeny"}, "commit_id": "abc123"}],
+                 "/issues/5/comments": [],
+                 "/issues/5/dependencies": [],
+                 "/commits/abc123": {"commit": {"message": "Fix thing\nOwner: wazen"}},
+                 "/issues": [issue()]}
+        (rows, _), _ = gs.snapshot(env=self.env, repos=["r"], opener=FakeHTTP(pages))
+        self.assertEqual(rows[0]["last_editor_trailer"], "wazen")
+
+    def test_no_trailer_when_newest_is_comment(self):
+        pages = {"/issues/5/events": [{"created_at": "2026-10-19T10:00:00Z", "event": "referenced",
+                                        "actor": {"login": "ins-sherbeeny"}, "commit_id": "abc123"}],
+                 "/issues/5/comments": [{"created_at": "2026-10-20T09:00:00Z",
+                                          "user": {"login": "ins-wazen"}}],
+                 "/issues/5/dependencies": [],
+                 "/issues": [issue()]}
+        (rows, _), _ = gs.snapshot(env=self.env, repos=["r"], opener=FakeHTTP(pages))
+        self.assertEqual(rows[0]["last_editor"], "ins-wazen")
+        self.assertIsNone(rows[0]["last_editor_trailer"])
+
+
+class ProjectPageCapTest(unittest.TestCase):
+    """Samir PR #6: the project items walk has a page cap like list_paginated."""
+
+    def test_page_cap_stops_runaway_cursor(self):
+        calls = []
+
+        class PG:
+            def graphql(self, query, variables=None):
+                calls.append(1)
+                if "organization" in query:
+                    return {"data": {"organization": {"projectsV2": {"nodes": [
+                        {"id": "P1", "title": "ins-work"}]}}}}
+                return {"data": {"node": {"items": {"nodes": [],
+                    "pageInfo": {"hasNextPage": True, "endCursor": "c"}}}}}
+        out, capped = gs.project_fields(PG(), max_pages=3)
+        self.assertTrue(capped)
+        self.assertEqual(len(calls), 4)  # 1 find + 3 capped pages

@@ -118,8 +118,16 @@ def github_issue_hygiene(rule, gh_data, now, baseline=False):
         reg_labels = set(registry.get("labels") or ())
         reg_alias = dict(registry.get("aliases") or {})
         reg_ids = dict(registry.get("ids") or {})
+        reg_logins = {str(k).lower(): v for k, v in (registry.get("logins") or {}).items()}
+        reg_shared = {str(s).lower() for s in (registry.get("shared") or ())}
     else:
         reg_labels, reg_alias, reg_ids = set(registry), {}, {}
+        reg_logins, reg_shared = {}, set()
+    # Shared agent logins (Dina, V10): edits from these, from bots, or from
+    # humans count as "unattributed", never as a V10 finding. The fallback set
+    # applies until the registry carries shared_logins.
+    if not reg_shared:
+        reg_shared = {"ins-sherbeeny", "ins-agent"}
     out_flags = []
     vcount = {i: 0 for i in range(1, 11)}
 
@@ -153,6 +161,14 @@ def github_issue_hygiene(rule, gh_data, now, baseline=False):
     today = _cairo_today(now)
     agent_issues = {}
     unassigned = 0
+    unattributed = 0
+
+    def resolve_token(tok):
+        """label/alias/login -> registered label, or None."""
+        t = reg_alias.get(tok, tok)
+        t = reg_logins.get(str(t).lower(), t)
+        return t if t in reg_labels else None
+
     for it in issues:
         ident = "%s:%s" % (it["repo"], it["number"])
         agent, v = resolve_owner(it)
@@ -160,10 +176,20 @@ def github_issue_hygiene(rule, gh_data, now, baseline=False):
             flag(ident, v)
         if agent is None:
             unassigned += 1
+        # V10 (Dina): attribution order (a) Co-authored-by/Owner trailer on the
+        # newest commit reference, (b) the issue's agent: label, (c) skip.
+        # V10 fires only when (a) names a different agent than the owner.
+        # Without (a): shared-agent logins, bots and humans are "unattributed".
+        trailer = it.get("last_editor_trailer")
         editor = it.get("last_editor")
-        if agent and editor:
-            if reg_alias.get(editor, editor) != agent:
+        etype = (it.get("last_editor_type") or "").strip().lower()
+        if trailer:
+            named = resolve_token(trailer)
+            if named and agent and named != agent:
                 flag(ident, 10, note="report_only")  # V10: report, not a violation
+        elif editor:
+            if etype == "bot" or str(editor).lower() in reg_shared or str(editor).lower() not in reg_logins:
+                unattributed += 1
         if not it.get("due"):
             flag(ident, 3)
         else:
@@ -203,6 +229,7 @@ def github_issue_hygiene(rule, gh_data, now, baseline=False):
                   "no_agent_label": sum(1 for it in issues if not it.get("agent")),
                   "no_due": sum(1 for it in issues if not it.get("due")),
                   "blocked_marked": sum(1 for it in issues if it.get("blocked_line_present")),
+                  "editor_unattributed": unattributed,
                   "would_flag": {("V%d" % v): c for v, c in vcount.items() if c}}
         return {"flags": [], "counts": counts}
     return out_flags
@@ -217,8 +244,15 @@ def parse_registry(path):
     """ins-infra registry/agents.yaml -> {labels, aliases, ids} (Dina FINAL 09:22).
     labels: registered agent labels. aliases: alias -> label. ids: agent_id,
     retired_ids and owns_ids -> label, so a body "Owner: <id>" line resolves."""
-    labels, aliases, ids = set(), {}, {}
+    labels, aliases, ids, logins, shared = set(), {}, {}, {}, set()
     for line in open(path):
+        ms = re.match(r"\s*shared_logins: \[([^\]]*)\]", line)
+        if ms:
+            for tok in ms.group(1).split(","):
+                tok = tok.strip().lower()
+                if tok:
+                    shared.add(tok)
+            continue
         m = re.search(r"- \{label: ([A-Za-z0-9_-]+),", line)
         if not m:
             continue
@@ -227,14 +261,19 @@ def parse_registry(path):
         mid = re.search(r"agent_id: (agent-[A-Za-z0-9]+)", line)
         if mid:
             ids[mid.group(1)] = label
-        for field in ("aliases", "retired_ids", "owns_ids"):
+        for field in ("aliases", "retired_ids", "owns_ids", "github_logins"):
             mf = re.search(field + r": \[([^\]]*)\]", line)
             if mf:
                 for tok in mf.group(1).split(","):
                     tok = tok.strip()
                     if tok:
-                        (ids if field != "aliases" else aliases)[tok] = label
-    return {"labels": labels, "aliases": aliases, "ids": ids}
+                        if field == "aliases":
+                            aliases[tok] = label
+                        elif field == "github_logins":
+                            logins[tok.lower()] = label
+                        else:
+                            ids[tok] = label
+    return {"labels": labels, "aliases": aliases, "ids": ids, "logins": logins, "shared": shared}
 
 
 def load_rules(path, expected_sha):
@@ -366,8 +405,19 @@ def main():
                 gh_data = {"issues": issues, "prs": prs, "registry": registry}
         except Exception:
             raise SystemExit("gh snapshot unreadable")
+    feed_meta = None
+    if len(sys.argv) > 7:
+        try:
+            m = json.load(open(sys.argv[7]))
+            feed_meta = {k: m.get(k) for k in ("project", "project_error", "blocked_native",
+                                               "editor_failed", "deps_failed", "repos_failed",
+                                               "project_pages_capped") if k in m}
+        except Exception:
+            feed_meta = {"error": "feed meta unreadable"}
     out = run(rules, ev, input_errors=bad + meta_err, gh_data=gh_data,
               r17_baseline=os.environ.get("R17_BASELINE") == "1")
+    if feed_meta is not None:
+        out["r17_feed"] = feed_meta
     out["events_seen"] = len(ev)
     out["skipped"] = meta_counts
     print(json.dumps(out, ensure_ascii=False))

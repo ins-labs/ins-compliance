@@ -118,10 +118,13 @@ REGD = {"labels": {"karim", "kaleem", "dina", "tamer"},
                 "agent-01M511VSJ3M80JNSZSZGSY12GM": "tamer"}}    # retired_ids
 
 
-def issue2(number=1, agent=None, owner_hint=None, last_editor=None, **kw):
+def issue2(number=1, agent=None, owner_hint=None, last_editor=None,
+           last_editor_type=None, last_editor_trailer=None, **kw):
     it = issue(number=number, agent=agent, **kw)
     it["owner_hint"] = owner_hint
     it["last_editor"] = last_editor
+    it["last_editor_type"] = last_editor_type
+    it["last_editor_trailer"] = last_editor_trailer
     return it
 
 
@@ -165,21 +168,63 @@ class R17OwnerResolutionTest(unittest.TestCase):
 
 
 class R17V10Test(unittest.TestCase):
-    """V10 report-only: last editor signature differs from the owner."""
+    """V10 (Dina): attribution order (a) Co-authored-by/Owner trailer on the
+    newest commit reference, (b) agent: label, (c) skip. V10 fires only when
+    (a) names a different agent than the owner. Shared-agent logins, bots and
+    humans without (a) count as unattributed, never as findings."""
 
-    def test_editor_mismatch_report_only(self):
-        f = flagsd([issue2(agent="karim", last_editor="dina")])
+    def test_shared_login_edit_no_v10(self):
+        f = flagsd([issue2(agent="karim", last_editor="ins-sherbeeny")])
+        self.assertEqual([x for x in f if x["count"] == 10], [])
+
+    def test_bot_edit_no_v10(self):
+        f = flagsd([issue2(agent="karim", last_editor="some-bot", last_editor_type="Bot")])
+        self.assertEqual([x for x in f if x["count"] == 10], [])
+
+    def test_human_edit_no_v10_unattributed(self):
+        data = {"issues": [issue2(agent="karim", last_editor="random-human")], "prs": [], "registry": REGD}
+        out = ck.github_issue_hygiene(RULE, data, NOW, baseline=True)
+        self.assertEqual(out["counts"]["editor_unattributed"], 1)
+        self.assertEqual([x for x in out["flags"] if x["count"] == 10], [])
+
+    def test_trailer_naming_another_agent_report_only(self):
+        f = flagsd([issue2(agent="karim", last_editor="ins-sherbeeny", last_editor_trailer="dina")])
         v10 = [x for x in f if x["count"] == 10]
         self.assertEqual(len(v10), 1)
         self.assertEqual(v10[0].get("note"), "report_only")
 
-    def test_editor_match_no_flag(self):
-        f = flagsd([issue2(agent="karim", last_editor="karim")])
+    def test_trailer_naming_owner_no_flag(self):
+        f = flagsd([issue2(agent="karim", last_editor_trailer="karim")])
         self.assertEqual([x for x in f if x["count"] == 10], [])
 
-    def test_editor_alias_match_no_flag(self):
-        f = flagsd([issue2(agent="kaleem", last_editor="salma")])
+    def test_trailer_alias_resolves(self):
+        f = flagsd([issue2(agent="kaleem", last_editor_trailer="salma")])
         self.assertEqual([x for x in f if x["count"] == 10], [])
+
+    def test_registered_login_edit_is_attributed_no_flag(self):
+        reg = dict(REGD)
+        reg["logins"] = {"karim-gh": "karim"}
+        f = ck.github_issue_hygiene(RULE, {"issues": [issue2(agent="karim", last_editor="karim-gh")],
+                                           "prs": [], "registry": reg}, NOW)
+        self.assertEqual([x for x in f if x["count"] == 10], [])
+
+    def test_editor_mismatch_without_trailer_no_v10(self):
+        f = flagsd([issue2(agent="karim", last_editor="dina")])
+        self.assertEqual([x for x in f if x["count"] == 10], [])
+
+
+class RegistryLoginsTest(unittest.TestCase):
+    def test_parse_github_logins_and_shared(self):
+        import tempfile
+        yaml_text = (
+            'shared_logins: [ins-sherbeeny, Ins-Agent]\n'
+            'agents:\n'
+            '  - {label: karim, name: "Karim", agent_id: agent-01M5BWTFBGC060Y1Q7V34TFCCF, status: active, github_logins: [Karim-GH, karim-alt]}\n')
+        p = tempfile.mktemp()
+        open(p, "w").write(yaml_text)
+        reg = ck.parse_registry(p)
+        self.assertEqual(reg["logins"], {"karim-gh": "karim", "karim-alt": "karim"})
+        self.assertEqual(reg["shared"], {"ins-sherbeeny", "ins-agent"})
 
 
 class R17RulesFileTest(unittest.TestCase):
@@ -268,6 +313,56 @@ class WrapperWiringTest(unittest.TestCase):
         import pathlib, subprocess
         w = (pathlib.Path(__file__).resolve().parent.parent / "wrapper.sh").read_text()
         self.assertIn("gh_snapshot.py", w)
-        self.assertIn("$DIR/issues.jsonl $REG", w)
+        self.assertIn("$DIR/issues.jsonl $REG $DIR/ghmeta.json", w)
         self.assertIn('GH_REGISTRY:-$BASE/registry/agents.yaml', w)
         subprocess.run(["sh", "-n", str(pathlib.Path(__file__).resolve().parent.parent / "wrapper.sh")], check=True)
+
+
+class FeedMetaTest(unittest.TestCase):
+    """Amen PR #6: the feed's degraded states must be visible in the output."""
+
+    def run_checker(self, meta):
+        import hashlib, json, subprocess, tempfile
+        d = tempfile.mkdtemp()
+        sha = hashlib.sha256(open("rules.yaml", "rb").read()).hexdigest()
+        ep = os.path.join(d, "e.jsonl")
+        open(ep, "w").write(json.dumps({"id": "e1", "ts": 1, "author": "user", "topic": "t", "kind": "msg", "text": "hi"}) + "\n")
+        mp = os.path.join(d, "m.json")
+        open(mp, "w").write(json.dumps({"skipped": {}}))
+        ip = os.path.join(d, "i.jsonl")
+        open(ip, "w").write(json.dumps(issue()) + "\n")
+        rp = os.path.join(d, "r.yaml")
+        open(rp, "w").write("- {label: karim, name: \"Karim\", agent_id: agent-01M5BWTFBGC060Y1Q7V34TFCCF, status: active}\n")
+        gp = os.path.join(d, "g.json")
+        open(gp, "w").write(json.dumps(meta))
+        r = subprocess.run([sys.executable, "checker.py", "rules.yaml", sha, ep, mp, ip, rp, gp],
+                           capture_output=True, text=True)
+        return json.loads(r.stdout)
+
+    def test_feed_meta_visible(self):
+        out = self.run_checker({"project": "error", "project_error": "github 403: forbidden",
+                                "blocked_native": "rest", "editor_failed": 2, "deps_failed": 0,
+                                "repos_failed": [], "project_pages_capped": False})
+        feed = out["r17_feed"]
+        self.assertEqual(feed["project"], "error")
+        self.assertEqual(feed["project_error"], "github 403: forbidden")
+        self.assertEqual(feed["editor_failed"], 2)
+
+    def test_feed_meta_unreadable_is_flagged(self):
+        import hashlib, json, subprocess, tempfile
+        d = tempfile.mkdtemp()
+        sha = hashlib.sha256(open("rules.yaml", "rb").read()).hexdigest()
+        ep = os.path.join(d, "e.jsonl")
+        open(ep, "w").write(json.dumps({"id": "e1", "ts": 1, "author": "user", "topic": "t", "kind": "msg", "text": "hi"}) + "\n")
+        mp = os.path.join(d, "m.json")
+        open(mp, "w").write(json.dumps({"skipped": {}}))
+        ip = os.path.join(d, "i.jsonl")
+        open(ip, "w").write(json.dumps(issue()) + "\n")
+        rp = os.path.join(d, "r.yaml")
+        open(rp, "w").write("- {label: karim, name: \"Karim\", agent_id: agent-01M5BWTFBGC060Y1Q7V34TFCCF, status: active}\n")
+        gp = os.path.join(d, "g.json")
+        open(gp, "w").write("{ not json")
+        r = subprocess.run([sys.executable, "checker.py", "rules.yaml", sha, ep, mp, ip, rp, gp],
+                           capture_output=True, text=True)
+        out = json.loads(r.stdout)
+        self.assertEqual(out["r17_feed"], {"error": "feed meta unreadable"})

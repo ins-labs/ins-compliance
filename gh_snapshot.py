@@ -14,11 +14,15 @@ is emitted, only ids and metadata. Any repo failure is collected and makes
 the exit status 1: a partial snapshot must never read as clean.
 
 Feed additions (issue #5): last_editor per issue (actor of the newest issue
-event or comment, falling back to the issue author), project fields
-Status/Due/Blocked-by from the org's "ins-work" project when a read:project
-token exists (GH_PROJECT_TOKEN_FILE), and native blocked-by links (REST issue
-dependencies) as the fallback when no project token is set. V5 silence windows:
-In progress = R17 threshold minutes, anything else (incl. Todo) = 24 h.
+event or comment, falling back to the issue author; actor type and a
+Co-authored-by/Owner trailer from a newest commit reference included for V10
+attribution), project fields Status/Due from the org's "ins-work" project when
+a read:project token exists (GH_PROJECT_TOKEN_FILE), and native blocked-by
+links from the REST issue-dependencies endpoint (the circuit breaker trips on
+404/422 only, never on transient 5xx). Editor and dependency calls are cached
+by issue updated_ts when GH_SNAPSHOT_STATE points at a writable state file, so
+only issues changed since the last snapshot cost API calls. V5 silence
+windows: In progress = R17 threshold minutes, anything else (incl. Todo) = 24 h.
 
 Usage: gh_snapshot.py META_JSON [REPO ...] > issues.jsonl
 """
@@ -164,7 +168,7 @@ def row_of(it, repo):
             "owner_hint": parse_owner(it.get("body") or ""),
             "blocked_by": blocked, "blocked_line_present": blocked_line,
             "blocked_by_closed": [],
-            "status": None, "last_editor": None,
+            "status": None, "last_editor": None, "last_editor_type": None, "last_editor_trailer": None,
             "created_ts": to_epoch(it["created_at"]), "updated_ts": to_epoch(it["updated_at"])}
 
 
@@ -182,9 +186,16 @@ def list_paginated(gh, path):
             raise GhError(0, "pagination cap")
 
 
+TRAILER_RE = re.compile(r"(?:^|\n)\s*(?:Co-authored-by:\s*([^<\n]+?)\s*<[^>]*>|Owner:\s*([^<\n.]+))", re.I)
+
+
 def editor_of(gh, repo, number, issue, org=ORG):
-    """Actor of the newest issue event or comment; falls back to the author."""
-    best_ts, best = -1, None
+    """Newest touch: (login, actor_type, trailer). Actor of the newest issue
+    event or comment; falls back to the issue author. When the newest event is
+    a commit reference (referenced/closed/cross-referenced with a commit_id),
+    the commit message is read for a Co-authored-by/Owner trailer - the cheap
+    attribution signal for V10 (Dina)."""
+    best_ts, best, best_type, best_commit = -1, None, None, None
     events = list_paginated(gh, f"/repos/{org}/{repo}/issues/{number}/events")
     comments = list_paginated(gh, f"/repos/{org}/{repo}/issues/{number}/comments")
     for ev in events:
@@ -192,14 +203,27 @@ def editor_of(gh, repo, number, issue, org=ORG):
         actor = (ev.get("actor") or {}).get("login")
         if actor and ts >= best_ts:
             best_ts, best = ts, actor
+            best_type = (ev.get("actor") or {}).get("type")
+            best_commit = ev.get("commit_id") if ev.get("event") in ("referenced", "closed", "cross-referenced") else None
     for c in comments:
         ts = to_epoch(c["created_at"]) if c.get("created_at") else 0
         actor = (c.get("user") or {}).get("login")
         if actor and ts >= best_ts:
             best_ts, best = ts, actor
+            best_type, best_commit = (c.get("user") or {}).get("type"), None
     if best is None:
         best = (issue.get("user") or {}).get("login")
-    return best
+        best_type = (issue.get("user") or {}).get("type")
+    trailer = None
+    if best_commit:
+        try:
+            msg = ((gh.get(f"/repos/{org}/{repo}/commits/{best_commit}") or {}).get("commit") or {}).get("message") or ""
+            m = TRAILER_RE.search(msg)
+            if m:
+                trailer = (m.group(1) or m.group(2) or "").strip() or None
+        except GhError:
+            trailer = None  # an unreadable commit loses the trailer, never the editor
+    return best, best_type, trailer
 
 
 PROJECT_FIND_Q = """query($org:String!){organization(login:$org){projectsV2(first:50){nodes{id title}}}}"""
@@ -207,14 +231,19 @@ PROJECT_ITEMS_Q = """query($id:ID!,$after:String){node(id:$id){... on ProjectV2{
 nodes{content{... on Issue{number repository{name}}} fieldValues(first:20){nodes{
 ... on ProjectV2ItemFieldSingleSelectValue{name field{... on ProjectV2FieldCommon{name}}}
 ... on ProjectV2ItemFieldDateValue{date field{... on ProjectV2FieldCommon{name}}}
-... on ProjectV2ItemFieldIssueValue{issues(first:10){nodes{number state}} field{... on ProjectV2FieldCommon{name}}}
+... on ProjectV2ItemFieldTextValue{text field{... on ProjectV2FieldCommon{name}}}
 }}} pageInfo{hasNextPage endCursor}}}}}"""
 PROJECT_TITLE = "ins-work"
 
 
-def project_fields(pg, org=ORG):
-    """ins-work project -> {(repo, number): {status, due, blocked: [(num, state)]}}.
-    Returns None when the project is not found."""
+MAX_PROJECT_PAGES = 50  # 5000 items is far past the org's size; a runaway cursor stops here
+
+
+def project_fields(pg, org=ORG, max_pages=MAX_PROJECT_PAGES):
+    """ins-work project -> ({(repo, number): {status, due}}, capped).
+    Blocked-by is not a project field here: native links come from the REST
+    dependencies endpoint only (Samir PR #6). Returns (None, False) when the
+    project is not found. capped=True means the page cap cut the walk short."""
     data = pg.graphql(PROJECT_FIND_Q, {"org": org})
     nodes = (((data.get("data") or {}).get("organization") or {}).get("projectsV2") or {}).get("nodes") or []
     pid = None
@@ -223,10 +252,11 @@ def project_fields(pg, org=ORG):
             pid = n.get("id")
             break
     if not pid:
-        return None
-    out, after = {}, None
+        return None, False
+    out, after, pages = {}, None, 0
     while True:
         data = pg.graphql(PROJECT_ITEMS_Q, {"id": pid, "after": after})
+        pages += 1
         items = ((data.get("data") or {}).get("node") or {}).get("items") or {}
         for node in items.get("nodes") or []:
             content = node.get("content") or {}
@@ -234,25 +264,37 @@ def project_fields(pg, org=ORG):
             number = content.get("number")
             if not repo or number is None:
                 continue  # draft items and non-issue cards carry no hygiene data
-            status, due, blocked = None, None, []
+            status, due = None, None
             for fv in (node.get("fieldValues") or {}).get("nodes") or []:
                 fname = ((fv.get("field") or {}).get("name") or "").strip().lower()
                 if fname == "status" and fv.get("name"):
                     status = fv["name"]
                 elif fname == "due" and fv.get("date"):
                     due = fv["date"]
-                elif fname == "blocked by":
-                    if fv.get("issues"):
-                        blocked += [(i["number"], (i.get("state") or "").lower())
-                                    for i in (fv["issues"].get("nodes") or []) if i.get("number")]
-                    elif fv.get("issue"):
-                        i = fv["issue"]
-                        blocked.append((i["number"], (i.get("state") or "").lower()))
-            out[(repo, number)] = {"status": status, "due": due, "blocked": blocked}
+            out[(repo, number)] = {"status": status, "due": due}
         page = items.get("pageInfo") or {}
         if not page.get("hasNextPage") or not page.get("endCursor"):
-            return out
+            return out, False
+        if pages >= max_pages:
+            return out, True
         after = page.get("endCursor")
+
+
+def load_cache(path):
+    """Snapshot cache {repo:number: {updated_ts, last_editor, deps}}. Anything
+    unreadable is a cold cache, never an error."""
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_cache(path, cache):
+    with open(path, "w") as fh:
+        json.dump(cache, fh)
+    os.chmod(path, 0o600)
 
 
 def apply_blocked(row, native):
@@ -276,19 +318,22 @@ def snapshot(env=None, repos=None, org=ORG, opener=None, gh=None):
     gh = gh or Gh(read_token(env), opener=opener)
     if repos is None:
         repos = [r["name"] for r in list_paginated(gh, f"/orgs/{org}/repos")]
-    # Project fields (Status/Due/Blocked-by) only when the read:project token
-    # exists; the snapshot stays honest without it (status None, meta says why).
-    pfields, project_state = None, "no_token"
+    # Project fields (Status/Due) only when the read:project token exists;
+    # the snapshot stays honest without it (status None, meta says why).
+    pfields, project_state, project_error, project_capped = None, "no_token", None, False
     if env.get("GH_PROJECT_TOKEN_FILE"):
         try:
             pg = Gh(read_token(env, "GH_PROJECT_TOKEN_FILE"), opener=opener)
-            pfields = project_fields(pg, org)
+            pfields, project_capped = project_fields(pg, org)
             project_state = "ok" if pfields is not None else "not_found"
-        except GhError:
-            pfields, project_state = None, "error"
+        except GhError as e:
+            pfields, project_state, project_error = None, "error", str(e)[:120]
+    state_path = env.get("GH_SNAPSHOT_STATE")
+    cache = load_cache(state_path) if state_path else {}
+    new_cache = {}
     rows, prs, failed = [], [], []
-    editor_failed = 0
-    blocked_native = "project" if pfields is not None else "rest"
+    editor_failed = editor_cached = deps_failed = deps_cached = 0
+    blocked_native = "rest"
     for repo in repos:
         try:
             items = list_paginated(gh, f"/repos/{org}/{repo}/issues?state=open")
@@ -310,30 +355,63 @@ def snapshot(env=None, repos=None, org=ORG, opener=None, gh=None):
             rows.append(row)
             by_number[it["number"]] = (row, it)
             open_numbers.add(it["number"])
-        # V10 feed: editor of last update (newest event or comment wins)
         for number, (row, it) in by_number.items():
-            try:
-                row["last_editor"] = editor_of(gh, repo, number, it, org)
-            except GhError:
-                editor_failed += 1
-        # Project fields + blocked-by links
-        for number, (row, it) in by_number.items():
+            key = "%s:%s" % (repo, number)
+            ent = cache.get(key) or {}
+            fresh = ent.get("updated_ts") == row["updated_ts"]
+            # V10 feed: editor of last update (newest event or comment wins)
+            editor_ok = False
+            if fresh and "last_editor" in ent:
+                row["last_editor"] = ent["last_editor"]
+                row["last_editor_type"] = ent.get("last_editor_type")
+                row["last_editor_trailer"] = ent.get("last_editor_trailer")
+                editor_cached += 1
+                editor_ok = True
+            else:
+                try:
+                    ed, et, tr = editor_of(gh, repo, number, it, org)
+                    row["last_editor"], row["last_editor_type"], row["last_editor_trailer"] = ed, et, tr
+                    editor_ok = True
+                except GhError:
+                    editor_failed += 1
+            # Project fields
             if pfields is not None:
                 pf = pfields.get((repo, number))
                 if pf:
                     row["status"] = pf["status"]
                     if not row["due"] and pf["due"]:
                         row["due"], row["due_source"] = pf["due"], "project"
-                    apply_blocked(row, pf["blocked"])
-            elif blocked_native == "rest":
-                try:
-                    deps = list_paginated(gh, f"/repos/{org}/{repo}/issues/{number}/dependencies/blocked_by")
-                    apply_blocked(row, [(d["number"], (d.get("state") or "").lower())
-                                        for d in deps if d.get("number")])
-                except GhError:
-                    blocked_native = "unsupported"  # circuit break: one probe, then stop
+            # Blocked-by links (REST dependencies only). The circuit breaker
+            # trips on 404/422 (feature off), never on transient 5xx.
+            deps_list, deps_ok = None, False
+            if blocked_native == "rest":
+                if fresh and "deps" in ent:
+                    deps_list = ent["deps"]
+                    deps_cached += 1
+                    deps_ok = True
+                else:
+                    try:
+                        deps = list_paginated(gh, f"/repos/{org}/{repo}/issues/{number}/dependencies/blocked_by")
+                        deps_list = [[d["number"], (d.get("state") or "").lower()] for d in deps if d.get("number")]
+                        deps_ok = True
+                    except GhError as e:
+                        if e.status in (404, 422):
+                            blocked_native = "unsupported"  # circuit break: feature off org-wide
+                        else:
+                            deps_failed += 1  # transient: skip this issue, keep probing
+            if deps_list:
+                apply_blocked(row, [tuple(d) for d in deps_list])
+            entry = {"updated_ts": row["updated_ts"]}
+            if editor_ok:
+                entry["last_editor"] = row["last_editor"]
+                entry["last_editor_type"] = row["last_editor_type"]
+                entry["last_editor_trailer"] = row["last_editor_trailer"]
+            if deps_ok:
+                entry["deps"] = deps_list
+            if len(entry) > 1:
+                new_cache[key] = entry
         # V6 support: resolve the state of referenced blockers not in the open
-        # set and not already classified by native/project links
+        # set and not already classified by native links
         for row in rows:
             if row["repo"] != repo:
                 continue
@@ -351,11 +429,20 @@ def snapshot(env=None, repos=None, org=ORG, opener=None, gh=None):
                     closed.append(n)
             row["blocked_by_closed"] = closed
             row.pop("_native", None)
+    if state_path:
+        try:
+            save_cache(state_path, new_cache)
+        except OSError:
+            pass  # a lost cache never fails the snapshot; the next run refetches
     rows.sort(key=lambda r: (r["repo"], r["number"]))
     meta = {"repos_failed": failed, "repos_ok": [r for r in repos if r not in failed],
             "issues_seen": len(rows), "prs_seen": len(prs),
             "project": project_state, "blocked_native": blocked_native,
-            "editor_failed": editor_failed}
+            "editor_failed": editor_failed, "editor_cached": editor_cached,
+            "deps_failed": deps_failed, "deps_cached": deps_cached,
+            "project_pages_capped": project_capped}
+    if project_error:
+        meta["project_error"] = project_error
     return (rows, prs), meta
 
 
@@ -366,6 +453,10 @@ def main(argv):
     meta_path = argv[1]
     repos = argv[2:] or None
     (rows, prs), meta = snapshot(repos=repos)
+    detail = (" project_error=%s" % meta["project_error"]) if meta.get("project_error") else ""
+    print("gh_snapshot: project=%s blocked_native=%s editor_failed=%d deps_failed=%d repos_failed=%d%s"
+          % (meta["project"], meta["blocked_native"], meta["editor_failed"],
+             meta["deps_failed"], len(meta["repos_failed"]), detail), file=sys.stderr)
     with open(meta_path, "w") as fh:
         json.dump(meta, fh, indent=1)
     os.chmod(meta_path, 0o600)
