@@ -486,7 +486,8 @@ class SnapshotCacheTest(unittest.TestCase):
         self.assertEqual(meta["deps_cached"], 0)
         cache = json.load(open(self.state))
         self.assertEqual(cache["r:5"]["last_editor"], "ins-dina")
-        self.assertEqual(cache["r:5"]["deps"], [31])  # numbers only; states re-read each run
+        self.assertEqual(cache["r:5"]["deps"]["same"], [31])  # numbers only; states re-read each run
+        self.assertTrue(cache["r:5"]["deps"]["ts"])
         import stat
         self.assertEqual(stat.S_IMODE(os.stat(self.state).st_mode), 0o600)
 
@@ -609,3 +610,97 @@ class CachedBlockerStateTest(unittest.TestCase):
         self.assertEqual(meta["deps_cached"], 1)          # cache hit, no deps call
         self.assertEqual([u for u in http2.urls if "/dependencies/" in u], [])
         self.assertEqual(rows[0]["blocked_by_closed"], [31])
+
+
+class CrossRepoBlockedByTest(unittest.TestCase):
+    """Samir PR #6: a cross-repo dependency must never be looked up as a
+    same-repo issue. Repro: a#9 blocked by b#5 (open) while a#5 is closed -
+    merging the foreign 5 same-repo yields a false V6."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self.tok = os.path.join(self.tmp, "tok")
+        with open(self.tok, "w") as fh:
+            fh.write(TOKEN)
+        os.chmod(self.tok, 0o600)
+        self.env = {"GH_TOKEN_FILE": self.tok}
+
+    def pages(self, cross_state):
+        return {
+            "/repos/org/a/issues/9/dependencies/blocked_by": [
+                {"number": 5, "state": "open",
+                 "repository_url": "https://api.github.com/repos/org/b"}],
+            "/repos/org/a/issues/9/events": [], "/repos/org/a/issues/9/comments": [],
+            "/repos/org/a/issues/5": {"number": 5, "state": "closed"},
+            "/repos/org/b/issues/5": {"number": 5, "state": cross_state},
+            "/repos/org/a/issues": [issue(number=9, body="Due: 2026-10-21")],
+        }
+
+    def test_cross_repo_open_blocker_no_false_v6(self):
+        (rows, _), _ = gs.snapshot(env=self.env, repos=["a"], org="org",
+                                   opener=FakeHTTP(self.pages("open")))
+        r = rows[0]
+        self.assertEqual(r["blocked_by"], [])               # foreign number stays out
+        self.assertEqual(r["blocked_by_cross"], ["b#5"])
+        self.assertTrue(r["blocked_line_present"])
+        self.assertEqual(r["blocked_by_closed"], [])        # b#5 is OPEN in repo b
+
+    def test_cross_repo_closed_blocker_flagged_qualified(self):
+        (rows, _), _ = gs.snapshot(env=self.env, repos=["a"], org="org",
+                                   opener=FakeHTTP(self.pages("closed")))
+        r = rows[0]
+        self.assertEqual(r["blocked_by"], [])
+        self.assertEqual(r["blocked_by_closed"], ["b#5"])   # qualified id, right repo
+
+    def test_other_org_dependency_qualified(self):
+        pages = self.pages("open")
+        pages["/repos/org/a/issues/9/dependencies/blocked_by"] = [
+            {"number": 7, "state": "open",
+             "repository_url": "https://api.github.com/repos/other/c"}]
+        pages["/repos/other/c/issues/7"] = {"number": 7, "state": "closed"}
+        (rows, _), _ = gs.snapshot(env=self.env, repos=["a"], org="org",
+                                   opener=FakeHTTP(pages))
+        r = rows[0]
+        self.assertEqual(r["blocked_by_cross"], ["other/c#7"])
+        self.assertEqual(r["blocked_by_closed"], ["other/c#7"])
+
+
+class DepsCacheAgeTest(unittest.TestCase):
+    """Samir PR #6: cached deps refresh when older than 1 h."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self.tok = os.path.join(self.tmp, "tok")
+        with open(self.tok, "w") as fh:
+            fh.write(TOKEN)
+        os.chmod(self.tok, 0o600)
+        self.state = os.path.join(self.tmp, "state.json")
+        self.env = {"GH_TOKEN_FILE": self.tok, "GH_SNAPSHOT_STATE": self.state}
+
+    def seed(self, age_s):
+        import time as _t
+        row_ts = gs.to_epoch("2026-10-20T08:00:00Z")
+        json.dump({"r:5": {"updated_ts": row_ts, "last_editor": "ins-dina",
+                           "deps": {"same": [31], "cross": [], "ts": int(_t.time()) - age_s}}},
+                  open(self.state, "w"))
+
+    def pages(self):
+        return {"/issues/5/events": [], "/issues/5/comments": [],
+                "/issues/5/dependencies/blocked_by": [{"number": 31, "state": "open"}],
+                "/issues": [issue(body="Due: 2026-10-21")]}
+
+    def test_fresh_cache_hit(self):
+        self.seed(1800)
+        http = FakeHTTP(self.pages())
+        (_, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
+        self.assertEqual(meta["deps_cached"], 1)
+        self.assertEqual([u for u in http.urls if "/dependencies/" in u], [])
+
+    def test_stale_cache_refetches(self):
+        self.seed(3700)
+        http = FakeHTTP(self.pages())
+        (_, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
+        self.assertEqual(meta["deps_cached"], 0)
+        self.assertEqual(len([u for u in http.urls if "/dependencies/" in u]), 1)

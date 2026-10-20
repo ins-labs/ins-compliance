@@ -168,7 +168,7 @@ def row_of(it, repo):
             "due": due, "due_source": "body" if due else None,
             "owner_hint": parse_owner(it.get("body") or ""),
             "blocked_by": blocked, "blocked_line_present": blocked_line,
-            "blocked_by_closed": [],
+            "blocked_by_cross": [], "blocked_by_closed": [],
             "status": None, "last_editor": None, "last_editor_type": None, "last_editor_trailer": None,
             "created_ts": to_epoch(it["created_at"]), "updated_ts": to_epoch(it["updated_at"])}
 
@@ -298,6 +298,22 @@ def save_cache(path, cache):
     os.chmod(path, 0o600)
 
 
+DEPS_MAX_AGE_S = 3600  # Samir PR #6: cached deps refresh when older than 1 h
+
+
+def parse_dep(d, org=ORG, this_repo=None):
+    """A dependency issue object -> ("same", number) or ("cross", qualified).
+    repository_url decides the repo; a missing one means same-repo (legacy
+    fixtures and older API shapes). qualified = "repo#n" (same org) or
+    "owner/repo#n" (other org)."""
+    num = d.get("number")
+    parts = (d.get("repository_url") or "").rstrip("/").split("/repos/")[-1].split("/")
+    owner, repo = (parts + [None, None])[:2] if len(parts) >= 2 else (None, None)
+    if not repo or (owner == org and repo == this_repo):
+        return "same", num
+    return "cross", ("%s#%s" % (repo, num)) if owner == org else ("%s/%s#%s" % (owner, repo, num))
+
+
 def apply_blocked(row, numbers):
     """Merge native blocked-by link NUMBERS into a snapshot row. States are
     never trusted from a cache or the link listing: the V6 loop re-reads every
@@ -311,6 +327,20 @@ def apply_blocked(row, numbers):
             row["blocked_by"].append(num)
             have.add(num)
     row["blocked_by"].sort()
+    row["blocked_line_present"] = True
+
+
+def apply_blocked_cross(row, qualified):
+    """Cross-repo blocked-by links never enter the same-repo number list
+    (Samir PR #6: a foreign number looked up here reads the wrong issue)."""
+    if not qualified:
+        return
+    have = set(row["blocked_by_cross"])
+    for q in qualified:
+        if q not in have:
+            row["blocked_by_cross"].append(q)
+            have.add(q)
+    row["blocked_by_cross"].sort()
     row["blocked_line_present"] = True
 
 
@@ -383,32 +413,45 @@ def snapshot(env=None, repos=None, org=ORG, opener=None, gh=None):
                     if not row["due"] and pf["due"]:
                         row["due"], row["due_source"] = pf["due"], "project"
             # Blocked-by links (REST dependencies only). The circuit breaker
-            # trips on 404/422 (feature off), never on transient 5xx.
-            deps_list, deps_ok = None, False
+            # trips on 404/422 (feature off), never on transient 5xx. Cached
+            # deps refresh when older than DEPS_MAX_AGE_S (Samir PR #6).
+            deps_same, deps_cross, deps_ok, deps_ts = None, None, False, None
             if blocked_native == "rest":
-                if fresh and "deps" in ent:
-                    deps_list = ent["deps"]
-                    deps_cached += 1
-                    deps_ok = True
-                else:
+                ent_deps = ent.get("deps")
+                if fresh and isinstance(ent_deps, dict) and ent_deps.get("ts"):
+                    age = time.time() - ent_deps["ts"]
+                    if age <= DEPS_MAX_AGE_S:
+                        deps_same = ent_deps.get("same") or []
+                        deps_cross = ent_deps.get("cross") or []
+                        deps_ts = ent_deps["ts"]
+                        deps_cached += 1
+                        deps_ok = True
+                # (legacy list-format entries carry no ts: they refetch once)
+                if not deps_ok:
                     try:
                         deps = list_paginated(gh, f"/repos/{org}/{repo}/issues/{number}/dependencies/blocked_by")
-                        deps_list = [d["number"] for d in deps if d.get("number")]
+                        deps_same, deps_cross = [], []
+                        for d in deps:
+                            kind, val = parse_dep(d, org, repo)
+                            (deps_same if kind == "same" else deps_cross).append(val)
+                        deps_ts = int(time.time())
                         deps_ok = True
                     except GhError as e:
                         if e.status in (404, 422):
                             blocked_native = "unsupported"  # circuit break: feature off org-wide
                         else:
                             deps_failed += 1  # transient: skip this issue, keep probing
-            if deps_list:
-                apply_blocked(row, deps_list)
+            if deps_same:
+                apply_blocked(row, deps_same)
+            if deps_cross:
+                apply_blocked_cross(row, deps_cross)
             entry = {"updated_ts": row["updated_ts"]}
             if editor_ok:
                 entry["last_editor"] = row["last_editor"]
                 entry["last_editor_type"] = row["last_editor_type"]
                 entry["last_editor_trailer"] = row["last_editor_trailer"]
             if deps_ok:
-                entry["deps"] = deps_list
+                entry["deps"] = {"same": deps_same or [], "cross": deps_cross or [], "ts": deps_ts}
             if len(entry) > 1:
                 new_cache[key] = entry
         # V6 support: re-read every referenced blocker's state each run. A
@@ -428,6 +471,17 @@ def snapshot(env=None, repos=None, org=ORG, opener=None, gh=None):
                     st = "unknown"
                 if st == "closed":
                     closed.append(n)
+            for q in row["blocked_by_cross"]:
+                owner_repo, _, num = q.rpartition("#")
+                o, _, r2 = owner_repo.rpartition("/")
+                o, r2 = o or org, r2 or owner_repo
+                try:
+                    one = gh.get(f"/repos/{o}/{r2}/issues/{num}")
+                    st = one.get("state") if isinstance(one, dict) else "unknown"
+                except GhError:
+                    st = "unknown"
+                if st == "closed":
+                    closed.append(q)
             row["blocked_by_closed"] = closed
     if state_path:
         try:
