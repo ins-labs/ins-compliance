@@ -361,7 +361,7 @@ def snapshot(env=None, repos=None, org=ORG, opener=None, gh=None):
             pfields, project_capped = project_fields(pg, org)
             project_state = "ok" if pfields is not None else "not_found"
         except GhError as e:
-            pfields, project_state, project_error = None, "error", str(e)[:120]
+            pfields, project_state, project_error = None, "error", "GhError status=%s" % e.status
     state_path = env.get("GH_SNAPSHOT_STATE")
     cache = load_cache(state_path) if state_path else {}
     new_cache = {}

@@ -20,4 +20,7 @@ fi
 OUT=$(python3 "$BASE/checker.py" "$1" "$2" "$DIR/ev.jsonl" "$DIR/meta.json" $GH_ARGS 2>/dev/null); RC2=$?
 if [ $RC2 -eq 2 ]; then echo "RULE CHECK FAILED: no events (not clean)"; exit 1; fi
 if [ $RC2 -ne 0 ] || [ -z "$OUT" ]; then echo "RULE CHECK FAILED: checker error or no output (not clean)"; exit 1; fi
+if [ -n "$GH_ARGS" ]; then
+  python3 "$BASE/checker.py" --feed-warn "$DIR/ghmeta.json" || true   # warning line on stdout, before the verdict
+fi
 echo "$OUT"

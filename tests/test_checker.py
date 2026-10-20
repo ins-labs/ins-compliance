@@ -1,4 +1,5 @@
-import sys, time; sys.path.insert(0, '.')
+import sys, time, os; sys.path.insert(0, '.')
+CHECKER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "checker.py")
 import checker as c
 R = {r["id"]: r for r in c.load_rules("rules.yaml", __import__("hashlib").sha256(open("rules.yaml","rb").read()).hexdigest())}
 N = 10000
@@ -37,6 +38,27 @@ def test_late_secret_found():
     assert len(c.secret_pattern(R["R07"], ev, N)) == 1
 def test_none_rules_counted():
     out = c.run(list(R.values()), [], N); assert out["total_rules"] == 32 and len(out["no_script_check"]) == 26
+def test_feed_degraded_line_project_error():
+    meta = {"project": "error", "project_error": "GhError status=500", "editor_failed": 0}
+    line = c.feed_degraded_line(meta)
+    assert line is not None and "project=error" in line and "GhError status=500" in line
+
+def test_feed_degraded_line_no_token_and_editor_failed():
+    assert "project=no_token" in c.feed_degraded_line({"project": "no_token", "editor_failed": 0})
+    assert "editor_failed=2" in c.feed_degraded_line({"project": "ok", "editor_failed": 2})
+
+def test_feed_degraded_line_ok_is_silent():
+    assert c.feed_degraded_line({"project": "ok", "editor_failed": 0}) is None
+    assert c.feed_degraded_line({"editor_failed": 0}) is None
+
+def test_feed_warn_cli_prints_visible_line():
+    # issue #7 ask 3: a project error produces the visible line, exit stays 0.
+    import subprocess, tempfile, json as J
+    f = tempfile.mktemp()
+    open(f, "w").write(J.dumps({"project": "error", "project_error": "GhError status=403", "editor_failed": 1}))
+    r = subprocess.run(["python3", CHECKER, "--feed-warn", f], capture_output=True, text=True)
+    assert r.returncode == 0 and "R17 FEED DEGRADED" in r.stdout and "project=error" in r.stdout and r.stderr == ""
+
 def test_parse_error_hard():
     import tempfile, hashlib
     p = tempfile.mktemp(); open(p, "w").write("rules:\n  - {id: R01, check: x}\n")
