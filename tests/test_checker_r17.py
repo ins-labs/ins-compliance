@@ -201,3 +201,14 @@ class RegistryParseTest(unittest.TestCase):
         self.assertEqual(reg["ids"]["agent-01M42Y047WEGCB4V5Z7K128C4T"], "karim")
         self.assertEqual(reg["ids"]["agent-01M511VSJ3M80JNSZSZGSY12GM"], "tamer")
         self.assertEqual(reg["ids"]["agent-01M5566SQRSQZKMVJK8BASJC50"], "kaleem")
+
+
+class RulesYamlStrictTest(unittest.TestCase):
+    def test_rules_yaml_safe_loads(self):
+        import pathlib, yaml
+        path = pathlib.Path(__file__).resolve().parent.parent / "rules.yaml"
+        doc = yaml.safe_load(path.read_text())
+        ids = [r["id"] for r in doc["rules"]]
+        self.assertEqual(len(ids), 30)
+        self.assertIn("R29", ids)
+        self.assertIn("R30", ids)
