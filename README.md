@@ -16,7 +16,7 @@ LLM-free rule checker. Read-only. Rules: rules.yaml (id, check, threshold, sever
 - wrapper.sh: set `GH_TOKEN_FILE` (plus optional `GH_SNAPSHOT_REPOS` and `GH_REGISTRY`, default `$CHECKER_DIR/registry/agents.yaml`) and the wrapper runs gh_snapshot.py and passes the feed to the checker; unset, R17 reports unproven (DEGRADED). A missing/unparsable registry also degrades R17 - never measures without it.
 - V9 linking is strict on purpose: a bare `#120` without a close/fix/ref word does not count as linked. V10 (last-editor mismatch, report-only) is implemented but the feed does not capture editor data yet, so it stays silent until it does (behavior pinned by test).
 - The snapshot emits `owner_hint` (the `Owner:` line segment) per issue; no titles or bodies ever leave the feed. The feed uses the list API with pagination only, never the search API.
-- Manual rules: R29 (no Docker images) and R30 (Mokalem wording) are `check: none` - listed as manual (`no_script_check`), never auto-measured.
+- Manual rules: R29 (no Docker images), R30 (Mokalem wording), R31 (no owner-name mention) and R32 (one single-session key, one running user) are `check: none` - listed as manual (`no_script_check`), never auto-measured.
 - First run: `R17_BASELINE=1` prints a counts line (`r17_baseline`) and flags nothing; per-issue flags start after the announced grooming switch.
 - The violation number (V1..V9) is carried in the flag's `count` field.
 - Project-field inputs (Status/Due from the ins-work project) land when the read:project token exists; the snapshot then carries `status` per issue.
