@@ -15,7 +15,7 @@ the exit status 1: a partial snapshot must never read as clean.
 
 Usage: gh_snapshot.py META_JSON [REPO ...] > issues.jsonl
 """
-import base64, json, os, re, stat, sys, time, urllib.error, urllib.request
+import base64, calendar, json, os, re, stat, sys, time, urllib.error, urllib.request
 
 API = "https://api.github.com"
 ORG = "ins-labs"
@@ -70,7 +70,9 @@ class Gh:
 
 
 def to_epoch(s):
-    return int(time.mktime(time.strptime(s, "%Y-%m-%dT%H:%M:%SZ")) - time.timezone)
+    # GitHub timestamps are UTC ("Z"): parse with timegm. mktime-timezone is
+    # wrong under DST in the host's local zone (Ayman PR #3).
+    return calendar.timegm(time.strptime(s, "%Y-%m-%dT%H:%M:%SZ"))
 
 
 def parse_due(body):
@@ -150,9 +152,10 @@ def snapshot(env=None, repos=None, org=ORG, opener=None, gh=None):
         for it in items:
             if "pull_request" in it:
                 body = it.get("body") or ""
-                branch = ""
                 prs.append({"repo": repo, "number": it["number"],
-                            "has_issue_ref": bool(LINKED_ISSUE_RE.search(body)) or bool(re.match(r"^(issue|fix|feat)/?\d+", branch)),
+                            # strict on purpose: a bare "#120" without a
+                            # close/fix/ref word does not count as linked
+                            "has_issue_ref": bool(LINKED_ISSUE_RE.search(body)),
                             "updated_ts": to_epoch(it["updated_at"])})
                 continue
             rows.append(row_of(it, repo))

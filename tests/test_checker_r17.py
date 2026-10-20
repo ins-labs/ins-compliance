@@ -212,3 +212,49 @@ class RulesYamlStrictTest(unittest.TestCase):
         self.assertEqual(len(ids), 30)
         self.assertIn("R29", ids)
         self.assertIn("R30", ids)
+
+
+class RegistryFailClosedTest(unittest.TestCase):
+    def test_issues_feed_without_registry_is_unproven(self):
+        # Samir PR #3: missing registry must degrade R17, never measure.
+        import hashlib, json, subprocess, tempfile
+        d = tempfile.mkdtemp()
+        sha = hashlib.sha256(open("rules.yaml", "rb").read()).hexdigest()
+        ep = os.path.join(d, "e.jsonl")
+        open(ep, "w").write(json.dumps({"id": "e1", "ts": 1, "author": "user", "topic": "t", "kind": "msg", "text": "hi"}) + "\n")
+        mp = os.path.join(d, "m.json")
+        open(mp, "w").write(json.dumps({"skipped": {}}))
+        ip = os.path.join(d, "i.jsonl")
+        open(ip, "w").write(json.dumps(issue()) + "\n")
+        r = subprocess.run([sys.executable, "checker.py", "rules.yaml", sha, ep, mp, ip],
+                           capture_output=True, text=True)
+        out = json.loads(r.stdout)
+        self.assertIn("R17", out["unproven_or_failed"])
+        self.assertEqual([f for f in out["flags"] if f["rule"] == "R17"], [])
+
+    def test_unparsable_registry_is_unproven(self):
+        import hashlib, json, subprocess, tempfile
+        d = tempfile.mkdtemp()
+        sha = hashlib.sha256(open("rules.yaml", "rb").read()).hexdigest()
+        ep = os.path.join(d, "e.jsonl")
+        open(ep, "w").write(json.dumps({"id": "e1", "ts": 1, "author": "user", "topic": "t", "kind": "msg", "text": "hi"}) + "\n")
+        mp = os.path.join(d, "m.json")
+        open(mp, "w").write(json.dumps({"skipped": {}}))
+        ip = os.path.join(d, "i.jsonl")
+        open(ip, "w").write(json.dumps(issue()) + "\n")
+        rp = os.path.join(d, "bad.yaml")
+        open(rp, "w").write("{{{ not a registry\n")
+        r = subprocess.run([sys.executable, "checker.py", "rules.yaml", sha, ep, mp, ip, rp],
+                           capture_output=True, text=True)
+        out = json.loads(r.stdout)
+        self.assertIn("R17", out["unproven_or_failed"])
+
+
+class WrapperWiringTest(unittest.TestCase):
+    def test_wrapper_runs_snapshot_and_passes_feed(self):
+        import pathlib, subprocess
+        w = (pathlib.Path(__file__).resolve().parent.parent / "wrapper.sh").read_text()
+        self.assertIn("gh_snapshot.py", w)
+        self.assertIn("$DIR/issues.jsonl $REG", w)
+        self.assertIn('GH_REGISTRY:-$BASE/registry/agents.yaml', w)
+        subprocess.run(["sh", "-n", str(pathlib.Path(__file__).resolve().parent.parent / "wrapper.sh")], check=True)

@@ -149,3 +149,27 @@ class SnapshotSafetyTest(unittest.TestCase):
             self.assertNotIn(secret, str(e.payload))
         else:
             self.fail("expected GhError")
+
+
+class ToEpochTest(unittest.TestCase):
+    def test_to_epoch_correct_under_dst_tz(self):
+        import os, time
+        old = os.environ.get("TZ")
+        os.environ["TZ"] = "Africa/Cairo"
+        time.tzset()
+        try:
+            self.assertEqual(gs.to_epoch("2026-10-20T00:00:00Z"), 1792454400)
+            self.assertEqual(gs.to_epoch("2026-07-01T12:00:00Z"), 1782907200)
+        finally:
+            if old is None:
+                del os.environ["TZ"]
+            else:
+                os.environ["TZ"] = old
+            time.tzset()
+
+    def test_rows_do_not_emit_last_editor_yet(self):
+        # V10 stays silent until the feed captures editor data (documented).
+        it = {"number": 5, "state": "open", "labels": [], "assignees": [],
+              "body": "Due: 2026-10-21", "created_at": "2026-10-20T00:00:00Z",
+              "updated_at": "2026-10-20T01:00:00Z"}
+        self.assertNotIn("last_editor", gs.row_of(it, "r"))

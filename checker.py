@@ -352,10 +352,18 @@ def main():
             for line in open(sys.argv[5]):
                 row = json.loads(line)
                 (issues if row.get("kind") == "issue" else prs).append(row)
-            registry = set()
+            registry = None
             if len(sys.argv) > 6:
-                registry = parse_registry(sys.argv[6])
-            gh_data = {"issues": issues, "prs": prs, "registry": registry}
+                try:
+                    registry = parse_registry(sys.argv[6])
+                    if not registry["labels"]:
+                        registry = None
+                except Exception:
+                    registry = None
+            if registry is None:
+                gh_data = None  # no trustworthy registry: R17 stays unproven (DEGRADED), never clean
+            else:
+                gh_data = {"issues": issues, "prs": prs, "registry": registry}
         except Exception:
             raise SystemExit("gh snapshot unreadable")
     out = run(rules, ev, input_errors=bad + meta_err, gh_data=gh_data,
