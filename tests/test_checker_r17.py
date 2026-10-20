@@ -205,7 +205,8 @@ class RegistryParseTest(unittest.TestCase):
 
 class RulesYamlStrictTest(unittest.TestCase):
     def test_rules_yaml_safe_loads(self):
-        import pathlib, yaml
+        import pathlib
+        yaml = __import__("pytest").importorskip("yaml")
         path = pathlib.Path(__file__).resolve().parent.parent / "rules.yaml"
         doc = yaml.safe_load(path.read_text())
         ids = [r["id"] for r in doc["rules"]]
