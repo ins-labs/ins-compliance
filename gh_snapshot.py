@@ -24,6 +24,7 @@ DUE_RE = re.compile(r"^Due: (\d{4}-\d{2}-\d{2})\s*$")
 BLOCKED_LINE_RE = re.compile(r"^Blocked by:? (.+)$", re.I | re.M)
 ISSUE_REF_RE = re.compile(r"(?<![\w/])#(\d+)")
 LINKED_ISSUE_RE = re.compile(r"(?i)\b(close[sd]?|fix(e[sd])?|resolve[sd]?|refs?)\b[^.\n]{0,40}#\d+")
+OWNER_RE = re.compile(r"^Owner: ([^.\n]+)", re.I | re.M)
 
 
 class GhError(RuntimeError):
@@ -90,6 +91,16 @@ def parse_blocked(body):
     return nums, True
 
 
+def parse_owner(body):
+    """Owner hint from a 'Owner: <name or id>' body line (Dina FINAL 09:22).
+    The hint stops at the first '.' or newline; resolution against the
+    registry happens in the checker, which owns the registry data."""
+    if not body:
+        return None
+    m = OWNER_RE.search(body)
+    return m.group(1).strip() if m else None
+
+
 def agent_of(labels):
     for name in labels:
         if name.startswith("agent:"):
@@ -104,6 +115,7 @@ def row_of(it, repo):
             "agent": agent_of(labels), "labels": labels,
             "assignees": [a["login"] for a in it.get("assignees", [])],
             "due": parse_due(it.get("body") or ""),
+            "owner_hint": parse_owner(it.get("body") or ""),
             "blocked_by": blocked, "blocked_line_present": blocked_line,
             "created_ts": to_epoch(it["created_at"]), "updated_ts": to_epoch(it["updated_at"])}
 

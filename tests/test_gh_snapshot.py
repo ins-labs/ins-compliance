@@ -107,3 +107,45 @@ class SnapshotTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OwnerHintTest(unittest.TestCase):
+    def test_owner_hint_stops_at_period(self):
+        self.assertEqual(gs.parse_owner("Owner: karim. Next steps"), "karim")
+
+    def test_owner_hint_stops_at_newline(self):
+        self.assertEqual(gs.parse_owner("Owner: agent-01M42, todo-xyz\nAction: do"), "agent-01M42, todo-xyz")
+
+    def test_owner_hint_case_insensitive(self):
+        self.assertEqual(gs.parse_owner("owner: dina"), "dina")
+
+    def test_owner_hint_absent(self):
+        self.assertIsNone(gs.parse_owner("no owner here"))
+
+    def test_row_carries_owner_hint(self):
+        it = {"number": 5, "state": "open", "labels": [], "assignees": [],
+              "body": "Due: 2026-10-21\nOwner: karim.\nrest", "created_at": "2026-10-20T00:00:00Z",
+              "updated_at": "2026-10-20T01:00:00Z"}
+        self.assertEqual(gs.row_of(it, "r")["owner_hint"], "karim")
+
+
+def _boom(req, timeout=0):
+    raise gs.GhError(401, {"message": "bad credentials"})
+
+
+class SnapshotSafetyTest(unittest.TestCase):
+    def test_no_search_api_in_source(self):
+        import pathlib
+        src = pathlib.Path(gs.__file__).read_text()
+        self.assertNotIn("/search/", src)
+
+    def test_token_never_in_errors(self):
+        secret = "ghp_unit_secret_never_print"
+        gh = gs.Gh(secret, opener=_boom)
+        try:
+            gh.get("/repos/x")
+        except gs.GhError as e:
+            self.assertNotIn(secret, str(e))
+            self.assertNotIn(secret, str(e.payload))
+        else:
+            self.fail("expected GhError")

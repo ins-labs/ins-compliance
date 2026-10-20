@@ -101,3 +101,103 @@ class R17Test(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+REGD = {"labels": {"karim", "kaleem", "dina", "tamer"},
+        "aliases": {"salma": "kaleem"},
+        "ids": {"agent-01M42Y047WEGCB4V5Z7K128C4T": "karim",      # owns_ids (ELEC clock)
+                "agent-01M511VSJ3M80JNSZSZGSY12GM": "tamer"}}    # retired_ids
+
+
+def issue2(number=1, agent=None, owner_hint=None, last_editor=None, **kw):
+    it = issue(number=number, agent=agent, **kw)
+    it["owner_hint"] = owner_hint
+    it["last_editor"] = last_editor
+    return it
+
+
+def flagsd(issues, prs=(), rule=RULE, reg=REGD):
+    return ck.github_issue_hygiene(rule, {"issues": issues, "prs": list(prs), "registry": reg}, NOW)
+
+
+class R17OwnerResolutionTest(unittest.TestCase):
+    """Dina FINAL 09:22: owner = registered agent: label, else body Owner line
+    (name or id in registry, stop at '.' or newline), else V1."""
+
+    def test_body_owner_id_resolves_via_owns_ids(self):
+        f = flagsd([issue2(owner_hint="agent-01M42Y047WEGCB4V5Z7K128C4T, todo-01M3X7Z3SXZ6GCHVQ7QQ83T21C")])
+        self.assertNotIn("ins-infra:1", [x["id"] for x in f if x["count"] in (1, 2)])
+
+    def test_retired_id_resolves(self):
+        f = flagsd([issue2(owner_hint="agent-01M511VSJ3M80JNSZSZGSY12GM.")])
+        self.assertNotIn("ins-infra:1", [x["id"] for x in f if x["count"] in (1, 2)])
+
+    def test_alias_label_resolves(self):
+        f = flagsd([issue2(agent="salma")])
+        self.assertNotIn("ins-infra:1", [x["id"] for x in f if x["count"] == 2])
+
+    def test_unknown_label_still_v2(self):
+        f = flagsd([issue2(agent="ghost")])
+        self.assertIn(2, [x["count"] for x in f if x["id"] == "ins-infra:1"])
+
+    def test_nothing_resolves_is_v1(self):
+        f = flagsd([issue2(owner_hint="nobody-known")])
+        self.assertIn(1, [x["count"] for x in f if x["id"] == "ins-infra:1"])
+
+    def test_label_wins_over_body(self):
+        f = flagsd([issue2(agent="karim", owner_hint="nobody-known")])
+        self.assertNotIn("ins-infra:1", [x["id"] for x in f if x["count"] in (1, 2)])
+
+    def test_body_owner_counts_for_v7(self):
+        # karim owns via body; unowned work exists -> idle agents flag, but karim not idle
+        f = flagsd([issue2(number=1, owner_hint="agent-01M42Y047WEGCB4V5Z7K128C4T"),
+                    issue2(number=2, agent=None, owner_hint=None)])
+        self.assertNotIn("karim", [x["id"] for x in f if x["count"] == 7])
+
+
+class R17V10Test(unittest.TestCase):
+    """V10 report-only: last editor signature differs from the owner."""
+
+    def test_editor_mismatch_report_only(self):
+        f = flagsd([issue2(agent="karim", last_editor="dina")])
+        v10 = [x for x in f if x["count"] == 10]
+        self.assertEqual(len(v10), 1)
+        self.assertEqual(v10[0].get("note"), "report_only")
+
+    def test_editor_match_no_flag(self):
+        f = flagsd([issue2(agent="karim", last_editor="karim")])
+        self.assertEqual([x for x in f if x["count"] == 10], [])
+
+    def test_editor_alias_match_no_flag(self):
+        f = flagsd([issue2(agent="kaleem", last_editor="salma")])
+        self.assertEqual([x for x in f if x["count"] == 10], [])
+
+
+class R17RulesFileTest(unittest.TestCase):
+    def test_r29_r30_manual_and_total_30(self):
+        import hashlib
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "rules.yaml")
+        sha = hashlib.sha256(open(path, "rb").read()).hexdigest()
+        rules = ck.load_rules(path, sha)
+        out = ck.run(rules, [], now=NOW)
+        self.assertEqual(out["total_rules"], 30)
+        self.assertIn("R29", out["no_script_check"])
+        self.assertIn("R30", out["no_script_check"])
+
+
+class RegistryParseTest(unittest.TestCase):
+    def test_parse_registry_full(self):
+        import tempfile
+        yaml_text = (
+            'agents:\n'
+            '  - {label: kaleem, name: "Kaleem (was Salma), calls", agent_id: agent-01M5566SQRSQZKMVJK8BASJC50, status: active, aliases: [salma]}\n'
+            '  - {label: tamer, name: "Tamer (retired)", agent_id: agent-01M5B5G0YSMKRK3AB3SF5CWGR5, status: active, retired_ids: [agent-01M511VSJ3M80JNSZSZGSY12GM]}\n'
+            '  - {label: karim, name: "Karim (small infra coder, checker v0)", agent_id: agent-01M5BWTFBGC060Y1Q7V34TFCCF, status: active, owns_ids: [agent-01M42Y047WEGCB4V5Z7K128C4T]}\n')
+        p = tempfile.mktemp()
+        open(p, "w").write(yaml_text)
+        reg = ck.parse_registry(p)
+        self.assertEqual(reg["labels"], {"kaleem", "tamer", "karim"})
+        self.assertEqual(reg["aliases"], {"salma": "kaleem"})
+        self.assertEqual(reg["ids"]["agent-01M42Y047WEGCB4V5Z7K128C4T"], "karim")
+        self.assertEqual(reg["ids"]["agent-01M511VSJ3M80JNSZSZGSY12GM"], "tamer")
+        self.assertEqual(reg["ids"]["agent-01M5566SQRSQZKMVJK8BASJC50"], "kaleem")

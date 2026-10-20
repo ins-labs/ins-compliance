@@ -28,3 +28,5 @@ rules:
   - {id: R26, check: none, threshold: 0, severity: low, owner: all}
   - {id: R27, check: none, threshold: 0, severity: low, owner: all}
   - {id: R28, check: none, threshold: 0, severity: low, owner: all}
+- {id: R29, check: none, threshold: 0, severity: high, owner: all}
+- {id: R30, check: none, threshold: 0, severity: low, owner: all}

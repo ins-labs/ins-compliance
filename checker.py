@@ -111,24 +111,59 @@ def github_issue_hygiene(rule, gh_data, now, baseline=False):
     issues = gh_data.get("issues", [])
     prs = gh_data.get("prs", [])
     registry = gh_data.get("registry") or set()
+    # Registry: either a bare label set (legacy) or a dict with labels /
+    # aliases (alias -> label) / ids (agent id, retired or owned, -> label),
+    # parsed from ins-infra registry/agents.yaml (Dina FINAL 09:22).
+    if isinstance(registry, dict):
+        reg_labels = set(registry.get("labels") or ())
+        reg_alias = dict(registry.get("aliases") or {})
+        reg_ids = dict(registry.get("ids") or {})
+    else:
+        reg_labels, reg_alias, reg_ids = set(registry), {}, {}
     out_flags = []
-    vcount = {i: 0 for i in range(1, 10)}
+    vcount = {i: 0 for i in range(1, 11)}
 
-    def flag(ident, v, age_min=0):
-        out_flags.append(_flag(rule, rule["owner"], ident, age_min, v))
+    def flag(ident, v, age_min=0, note=None):
+        f = _flag(rule, rule["owner"], ident, age_min, v)
+        if note:
+            f["note"] = note
+        out_flags.append(f)
         vcount[v] += 1
+
+    def resolve_owner(it):
+        """Returns (owner_label, violation): the registered agent: label wins;
+        otherwise the body Owner hint (name/id in registry); otherwise V1.
+        A label outside the registry is V2."""
+        agent = it.get("agent")
+        if agent:
+            canon = reg_alias.get(agent, agent)
+            if not reg_labels or canon in reg_labels:
+                return canon, None
+            return None, 2
+        hint = it.get("owner_hint")
+        if hint:
+            for tok in (t.strip(".") for t in hint.replace(",", " ").split()):
+                if tok in reg_ids:
+                    return reg_ids[tok], None
+                canon = reg_alias.get(tok, tok)
+                if canon in reg_labels:
+                    return canon, None
+        return None, 1
 
     today = _cairo_today(now)
     agent_issues = {}
     unassigned = 0
     for it in issues:
         ident = "%s:%s" % (it["repo"], it["number"])
-        agent = it.get("agent")
-        if not agent:
-            flag(ident, 1)
+        agent, v = resolve_owner(it)
+        if v:
+            flag(ident, v)
+        if agent is None:
             unassigned += 1
-        elif registry and agent not in registry:
-            flag(ident, 2)
+        editor = it.get("last_editor")
+        if agent and editor:
+            if reg_alias.get(editor, editor) != agent:
+                flag(ident, 10, note="report_only")  # V10: report, not a violation
         if not it.get("due"):
             flag(ident, 3)
         else:
@@ -151,9 +186,9 @@ def github_issue_hygiene(rule, gh_data, now, baseline=False):
                 flag(ident, 6)
         if agent:
             agent_issues.setdefault(agent, []).append(it)
-    if registry:
+    if reg_labels:
         if unassigned:
-            for agent in sorted(registry - set(agent_issues)):
+            for agent in sorted(reg_labels - set(agent_issues)):
                 flag(agent, 7)
         for agent, rows in agent_issues.items():
             ages = [(now - r["updated_ts"]) / 60 for r in rows]
@@ -164,6 +199,7 @@ def github_issue_hygiene(rule, gh_data, now, baseline=False):
             flag("%s:%s" % (pr["repo"], pr["number"]), 9, (now - pr.get("updated_ts", now)) / 60)
     if baseline:
         counts = {"open_issues": len(issues), "open_prs": len(prs),
+                  "owned": sum(1 for it in issues if resolve_owner(it)[0]),
                   "no_agent_label": sum(1 for it in issues if not it.get("agent")),
                   "no_due": sum(1 for it in issues if not it.get("due")),
                   "blocked_marked": sum(1 for it in issues if it.get("blocked_line_present")),
@@ -175,6 +211,30 @@ def github_issue_hygiene(rule, gh_data, now, baseline=False):
 CHECKS = {f.__name__: f for f in (ack_latency_s, root_topic_posts, secret_pattern, self_decision_pick,
                                   one_decision_per_card, idle_unblocked_todo_min, github_issue_hygiene)}
 UNMEASURED = {"idle_unblocked_todo_min"}
+
+
+def parse_registry(path):
+    """ins-infra registry/agents.yaml -> {labels, aliases, ids} (Dina FINAL 09:22).
+    labels: registered agent labels. aliases: alias -> label. ids: agent_id,
+    retired_ids and owns_ids -> label, so a body "Owner: <id>" line resolves."""
+    labels, aliases, ids = set(), {}, {}
+    for line in open(path):
+        m = re.search(r"- \{label: ([A-Za-z0-9_-]+),", line)
+        if not m:
+            continue
+        label = m.group(1)
+        labels.add(label)
+        mid = re.search(r"agent_id: (agent-[A-Za-z0-9]+)", line)
+        if mid:
+            ids[mid.group(1)] = label
+        for field in ("aliases", "retired_ids", "owns_ids"):
+            mf = re.search(field + r": \[([^\]]*)\]", line)
+            if mf:
+                for tok in mf.group(1).split(","):
+                    tok = tok.strip()
+                    if tok:
+                        (ids if field != "aliases" else aliases)[tok] = label
+    return {"labels": labels, "aliases": aliases, "ids": ids}
 
 
 def load_rules(path, expected_sha):
@@ -294,10 +354,7 @@ def main():
                 (issues if row.get("kind") == "issue" else prs).append(row)
             registry = set()
             if len(sys.argv) > 6:
-                for line in open(sys.argv[6]):
-                    m = re.search(r"- \{label: ([A-Za-z0-9_-]+),", line)
-                    if m:
-                        registry.add(m.group(1))
+                registry = parse_registry(sys.argv[6])
             gh_data = {"issues": issues, "prs": prs, "registry": registry}
         except Exception:
             raise SystemExit("gh snapshot unreadable")
