@@ -1,0 +1,11 @@
+{
+  "_comment": "Pinned excerpt of GitHub's GraphQL schema (2026-10-20 dry run) covering exactly the types/fields the snapshot queries use. Notably absent: ProjectV2ItemFieldIssueValue - it does not exist (Samir PR #6).",
+  "types": ["Query", "Organization", "ProjectV2Connection", "ProjectV2", "ProjectV2ItemConnection",
+            "ProjectV2Item", "ProjectV2ItemContent", "Issue", "Repository",
+            "ProjectV2ItemFieldValueConnection", "ProjectV2ItemFieldValue",
+            "ProjectV2ItemFieldSingleSelectValue", "ProjectV2ItemFieldDateValue",
+            "ProjectV2ItemFieldTextValue", "ProjectV2FieldCommon", "PageInfo"],
+  "fields": ["organization", "node", "projectsV2", "nodes", "id", "title", "items", "content",
+             "number", "repository", "name", "state", "fieldValues", "field", "date", "text",
+             "pageInfo", "hasNextPage", "endCursor", "login"]
+}
