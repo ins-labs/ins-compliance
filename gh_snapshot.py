@@ -39,9 +39,12 @@ def read_token(env):
     if not path:
         raise SystemExit("GH_TOKEN_FILE is required (path to a root-only 0600 read-only PAT file)")
     try:
-        mode = stat.S_IMODE(os.stat(path).st_mode)
+        st = os.stat(path)
+        mode = stat.S_IMODE(st.st_mode)
     except OSError:
         raise SystemExit(f"GH_TOKEN_FILE {path} is not a regular file")
+    if st.st_uid not in (0, os.geteuid()):
+        raise SystemExit("GH_TOKEN_FILE must be owned by root or the current user")
     if mode not in ALLOWED_MODES:
         raise SystemExit(f"GH_TOKEN_FILE has insecure permissions {mode:o} (allowed: 400/440/600/640)")
     token = open(path).read().strip()
@@ -50,11 +53,27 @@ def read_token(env):
     return token
 
 
+class AuthSafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """urllib replays request headers across redirects; drop Authorization
+    when the redirect leaves the API host so the token cannot leak."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is None:
+            return None
+        from urllib.parse import urlparse
+        if urlparse(new.full_url).hostname != urlparse(req.full_url).hostname:
+            new.headers.pop("Authorization", None)
+        return new
+
+
 class Gh:
     def __init__(self, token, api=API, opener=None):
         self.api = api
         self._headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
-        self._open = opener or urllib.request.urlopen
+        if opener is None:
+            opener = urllib.request.build_opener(AuthSafeRedirectHandler()).open
+        self._open = opener
 
     def get(self, path):
         req = urllib.request.Request(self.api + path, headers=self._headers)
@@ -71,7 +90,7 @@ class Gh:
 
 def to_epoch(s):
     # GitHub timestamps are UTC ("Z"): parse with timegm. mktime-timezone is
-    # wrong under DST in the host's local zone (Ayman PR #3).
+    # wrong under DST in the host's local zone (Amen PR #3).
     return calendar.timegm(time.strptime(s, "%Y-%m-%dT%H:%M:%SZ"))
 
 

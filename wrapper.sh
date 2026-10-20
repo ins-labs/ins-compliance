@@ -7,7 +7,7 @@ DIR=$(mktemp -d "${CHECKER_STATE:-$HOME/.compliance}.XXXXXX") || { echo "RULE CH
 trap 'rm -rf "$DIR"' EXIT INT TERM
 python3 "$BASE/adapter.py" "$3" "$4" "$DIR/meta.json" >"$DIR/ev.jsonl" 2>/dev/null; RC1=$?
 if [ $RC1 -ne 0 ]; then echo "RULE CHECK FAILED: adapter error (not clean)"; exit 1; fi
-# Optional R17 GitHub feed (Ayman PR #3): with GH_TOKEN_FILE set, snapshot the
+# Optional R17 GitHub feed (Amen PR #3): with GH_TOKEN_FILE set, snapshot the
 # org's open issues and hand the checker the feed + registry. Without it R17
 # reports unproven (DEGRADED) - honest, never clean.
 GH_ARGS=""
