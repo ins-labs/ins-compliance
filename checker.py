@@ -208,7 +208,9 @@ def github_issue_hygiene(rule, gh_data, now, baseline=False):
                     flag(ident, 4, (now - it["updated_ts"]) / 60)
             except ValueError:
                 flag(ident, 3)  # unparseable due = no usable due
-        if not it.get("blocked_line_present"):
+        if (it.get("status") or "").strip().lower() == "done":
+            pass  # issue #17: project Done = finished work, never stale
+        elif not it.get("blocked_line_present"):
             silent_min = (now - it["updated_ts"]) / 60
             window = n_min if (it.get("status") or "").strip().lower() == "in progress" else 24 * 60
             if silent_min > window:

@@ -58,6 +58,18 @@ class R17Test(unittest.TestCase):
         f = flags([issue(updated=NOW - 25 * 3600, status="Todo")])
         self.assertTrue(any(x["id"] == "ins-infra:1" for x in f))
 
+    def test_v5_done_status_exempt(self):
+        # issue #17: project Status Done = finished work, never stale
+        self.assertEqual(flags([issue(updated=NOW - 49 * 3600, status="Done")]), [])
+
+    def test_v5_done_case_insensitive(self):
+        self.assertEqual(flags([issue(updated=NOW - 49 * 3600, status="done")]), [])
+
+    def test_v5_unknown_status_keeps_24h(self):
+        self.assertEqual(flags([issue(updated=NOW - 23 * 3600, status="In review")]), [])
+        f = flags([issue(updated=NOW - 25 * 3600, status="In review")])
+        self.assertTrue(any(x["id"] == "ins-infra:1" for x in f))
+
     def test_v5_skipped_when_blocked_marked(self):
         self.assertEqual(flags([issue(updated=NOW - 25 * 3600, blocked=[5], blocked_line=True, status="In progress")]), [])
 
