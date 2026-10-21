@@ -37,7 +37,7 @@ def test_late_secret_found():
     ev = [E("a1", 0, "agent", text="x" * 30000 + "ghp_" + "B" * 30)]
     assert len(c.secret_pattern(R["R07"], ev, N)) == 1
 def test_none_rules_counted():
-    out = c.run(list(R.values()), [], N); assert out["total_rules"] == 32 and len(out["no_script_check"]) == 26
+    out = c.run(list(R.values()), [], N); assert out["total_rules"] == 33 and len(out["no_script_check"]) == 26
 def test_feed_degraded_line_project_error():
     meta = {"project": "error", "project_error": "GhError status=500", "editor_failed": 0}
     line = c.feed_degraded_line(meta)

@@ -10,6 +10,13 @@ MAX_TEXT = 20000
 SECRET = re.compile(r'(ghp_[A-Za-z0-9]{20,}|github_pat_\w{20,}|xox[asrbpe]-[\w-]{10,}|xapp-[\w-]{10,}|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{12,}'
                     r'|\b\d{6,12}:[A-Za-z0-9_-]{30,}\b|-----BEGIN [A-Z ]*(PRIVATE KEY|OPENSSH PRIVATE KEY)-----'
                     r'|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|\bnfp_[A-Za-z0-9]{20,}|\bhvs\.[A-Za-z0-9]{20,})')
+BANNED_PHRASES = (
+    "execution isn't mine",
+    "execution is not mine",
+    "execution isnt mine",
+    "التنفيذ مش بتاعي",
+    "التنفيذ ليس بتاعي",
+)
 ID_OK = re.compile(r'^[A-Za-z0-9_.:-]{1,80}$')
 MAX_EVENTS = 20000
 WINDOW_S = 7 * 86400
@@ -83,6 +90,22 @@ def self_decision_pick(rule, ev, now):
 def one_decision_per_card(rule, ev, now):
     return [_flag(rule, rule["owner"], e["id"], (now - e["ts"]) / 60, len(DECISION.findall(e["text"][:MAX_TEXT])))
             for e in ev if e["author"] == "agent" and e["kind"] == "card" and len(DECISION.findall(e["text"][:MAX_TEXT])) > 1]
+
+
+def dm_topic_notes(rule, ev, now, dm_topics=None):
+    if dm_topics is None:
+        return None  # signal degraded/unproven
+    dm_set = set(dm_topics)
+    out = []
+    for e in ev:
+        # Check A: author agent, kind msg or card, topic in dm_topics
+        is_dm_agent = (e["author"] == "agent" and e["kind"] in ("msg", "card") and e.get("topic") in dm_set)
+        # Check B: text contains any banned phrase (any topic, any author/kind)
+        text_lower = e.get("text", "").lower()
+        has_banned = any(p in text_lower for p in BANNED_PHRASES)
+        if is_dm_agent or has_banned:
+            out.append(_flag(rule, rule["owner"], e["id"], (now - e["ts"]) / 60))
+    return out
 
 
 def idle_unblocked_todo_min(rule, ev, now):
@@ -247,7 +270,7 @@ def github_issue_hygiene(rule, gh_data, now, baseline=False):
 
 
 CHECKS = {f.__name__: f for f in (ack_latency_s, root_topic_posts, secret_pattern, self_decision_pick,
-                                  one_decision_per_card, idle_unblocked_todo_min, github_issue_hygiene)}
+                                  one_decision_per_card, dm_topic_notes, idle_unblocked_todo_min, github_issue_hygiene)}
 UNMEASURED = {"idle_unblocked_todo_min"}
 
 
@@ -329,7 +352,7 @@ def feed_degraded_line(meta):
     return "R17 FEED DEGRADED: " + " ".join(parts)
 
 
-def run(rules, ev, now=None, input_errors=0, gh_data=None, r17_baseline=False):
+def run(rules, ev, now=None, input_errors=0, gh_data=None, r17_baseline=False, dm_topics=None):
     now = now or time.time()
     errs = input_errors
     try:
@@ -364,7 +387,11 @@ def run(rules, ev, now=None, input_errors=0, gh_data=None, r17_baseline=False):
             continue
         try:
             signal.signal(signal.SIGALRM, _alarm); signal.alarm(CHECK_TIMEOUT_S)
-            flags += fn(r, ev, now); measured += 1
+            res = fn(r, ev, now, dm_topics=dm_topics) if r["check"] == "dm_topic_notes" else fn(r, ev, now)
+            if res is None:
+                failed.append(r["id"])
+            else:
+                flags += res; measured += 1
         except Exception:
             failed.append(r["id"])
         finally:
@@ -443,8 +470,27 @@ def main():
                                                "project_pages_capped") if k in m}
         except Exception:
             feed_meta = {"error": "feed meta unreadable"}
+    dm_topics = None
+    if len(sys.argv) > 8:
+        try:
+            cfg = json.load(open(sys.argv[8]))
+            if isinstance(cfg, dict) and "dm_topics" in cfg and isinstance(cfg["dm_topics"], list):
+                dm_topics = cfg["dm_topics"]
+        except Exception:
+            dm_topics = None
+    elif len(sys.argv) > 4:
+        # Fallback check if the 4th argument (META_JSON/CONFIG_JSON) or other args contain dm_topics
+        for arg in sys.argv[4:]:
+            try:
+                cfg = json.load(open(arg))
+                if isinstance(cfg, dict) and "dm_topics" in cfg and isinstance(cfg["dm_topics"], list):
+                    dm_topics = cfg["dm_topics"]
+                    break
+            except Exception:
+                pass
+
     out = run(rules, ev, input_errors=bad + meta_err, gh_data=gh_data,
-              r17_baseline=os.environ.get("R17_BASELINE") == "1")
+              r17_baseline=os.environ.get("R17_BASELINE") == "1", dm_topics=dm_topics)
     if feed_meta is not None:
         out["r17_feed"] = feed_meta
     out["events_seen"] = len(ev)

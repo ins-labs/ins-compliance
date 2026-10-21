@@ -17,7 +17,7 @@ if [ -n "${GH_TOKEN_FILE:-}" ]; then
   [ -f "$REG" ] || { echo "RULE CHECK FAILED: registry unreadable (not clean)"; exit 1; }
   GH_ARGS="$DIR/issues.jsonl $REG $DIR/ghmeta.json"
 fi
-OUT=$(python3 "$BASE/checker.py" "$1" "$2" "$DIR/ev.jsonl" "$DIR/meta.json" $GH_ARGS 2>/dev/null); RC2=$?
+OUT=$(python3 "$BASE/checker.py" "$1" "$2" "$DIR/ev.jsonl" "$DIR/meta.json" $GH_ARGS "$4" 2>/dev/null); RC2=$?
 if [ $RC2 -eq 2 ]; then echo "RULE CHECK FAILED: no events (not clean)"; exit 1; fi
 if [ $RC2 -ne 0 ] || [ -z "$OUT" ]; then echo "RULE CHECK FAILED: checker error or no output (not clean)"; exit 1; fi
 if [ -n "$GH_ARGS" ]; then
