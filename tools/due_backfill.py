@@ -40,6 +40,41 @@ def insert_due(body, date):
     return "Due: %s\n%s" % (date, body)
 
 
+def audit_rows(repo, issues):
+    """Pure: open issues missing a first-line Due -> report rows (issue #24).
+    PRs are excluded; the owner is the agent:<name> label when present."""
+    rows = []
+    for it in issues:
+        if it.get("pull_request"):
+            continue
+        body = it.get("body") or ""
+        if DUE_RE.match(body.split("\n", 1)[0]):
+            continue
+        owner = None
+        for lab in it.get("labels") or []:
+            name = lab.get("name") or ""
+            if name.startswith("agent:"):
+                owner = name.split(":", 1)[1]
+                break
+        rows.append({"repo": repo, "number": it["number"], "owner": owner,
+                     "created": (it.get("created_at") or "")[:10]})
+    return rows
+
+
+def list_paginated(tok, path):
+    out, url = [], path
+    sep = "&" if "?" in path else "?"
+    page = 1
+    while True:
+        batch = gh("GET", "%s%sper_page=100&page=%d" % (path, sep, page), tok)
+        if not batch:
+            return out
+        out.extend(batch)
+        if len(batch) < 100:
+            return out
+        page += 1
+
+
 def token():
     p = os.environ.get("GH_TOKEN_FILE")
     st = os.stat(p)
@@ -55,7 +90,25 @@ def gh(method, path, tok, body=None):
     return json.load(urllib.request.urlopen(req))
 
 
+def run_audit(tok, allow):
+    repos = sorted(allow) if allow else [
+        r["name"] for r in list_paginated(tok, "/orgs/%s/repos?type=all" % ORG)]
+    total = 0
+    for repo in repos:
+        rows = audit_rows(repo, list_paginated(
+            tok, "/repos/%s/%s/issues?state=open" % (ORG, repo)))
+        for row in rows:
+            print(json.dumps(row))
+        total += len(rows)
+    print("audit: repos=%d missing_due=%d (read-only, zero writes)" % (len(repos), total),
+          file=sys.stderr)
+
+
 def main(argv):
+    if "--audit" in argv:
+        allow = {argv[i + 1] for i, a in enumerate(argv) if a == "--allow" and i + 1 < len(argv)}
+        run_audit(token(), allow)
+        return
     apply_mode = "--apply" in argv
     allow = {argv[i + 1] for i, a in enumerate(argv) if a == "--allow" and i + 1 < len(argv)}
     mapping_path = next(a for a in argv[1:] if not a.startswith("--") and a not in allow)
