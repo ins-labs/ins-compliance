@@ -267,7 +267,7 @@ class R17RulesFileTest(unittest.TestCase):
         sha = hashlib.sha256(open(path, "rb").read()).hexdigest()
         rules = ck.load_rules(path, sha)
         out = ck.run(rules, [], now=NOW)
-        self.assertEqual(out["total_rules"], 32)
+        self.assertEqual(out["total_rules"], 33)
         self.assertIn("R29", out["no_script_check"])
         self.assertIn("R30", out["no_script_check"])
         self.assertIn("R31", out["no_script_check"])
@@ -302,7 +302,7 @@ class RulesYamlStrictTest(unittest.TestCase):
         path = pathlib.Path(__file__).resolve().parent.parent / "rules.yaml"
         doc = yaml.safe_load(path.read_text())
         ids = [r["id"] for r in doc["rules"]]
-        self.assertEqual(len(ids), 32)
+        self.assertEqual(len(ids), 33)
         self.assertIn("R29", ids)
         self.assertIn("R30", ids)
         self.assertIn("R31", ids)
