@@ -24,9 +24,13 @@ BACKFILL = os.path.join(TOOLS, "due_backfill.py")
 
 
 def aggregate(missing_rows, trailer_rows, since):
-    """Pure: audit rows + trailer rows -> weekly report dict."""
-    total = sum(r.get("total", 0) for r in trailer_rows)
-    with_t = sum(r.get("with", 0) for r in trailer_rows)
+    """Pure: audit rows + trailer/misattribution rows -> weekly report.
+    Misattribution rows (issue #36) carry a "trailer" key, adoption rows a
+    "total" key; they are split here, not summed together."""
+    adoption = [r for r in trailer_rows if "total" in r]
+    misattr = [r for r in trailer_rows if "trailer" in r]
+    total = sum(r.get("total", 0) for r in adoption)
+    with_t = sum(r.get("with", 0) for r in adoption)
     return {
         "date": datetime.date.today().isoformat(),
         "since": since,
@@ -34,7 +38,9 @@ def aggregate(missing_rows, trailer_rows, since):
         "missing_due_rows": list(missing_rows),
         "trailers": {"total": total, "with": with_t,
                      "pct": (100 * with_t // total) if total else 0},
-        "trailer_rows": list(trailer_rows),
+        "trailer_rows": adoption,
+        "misattributed": len(misattr),
+        "misattributed_rows": misattr,
     }
 
 
