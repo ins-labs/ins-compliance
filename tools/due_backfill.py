@@ -24,6 +24,8 @@ API = "https://api.github.com"
 ORG = "ins-labs"
 DUE_RE = re.compile(r"^Due: \d{4}-\d{2}-\d{2}\s*$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+TRAILER_RE = re.compile(r"^Agent:\s*\S+\s*$", re.M)
+SUFFIX_RE = re.compile(r"\(agent:[a-z0-9-]+\)")
 
 
 def insert_due(body, date):
@@ -59,6 +61,21 @@ def audit_rows(repo, issues):
         rows.append({"repo": repo, "number": it["number"], "owner": owner,
                      "created": (it.get("created_at") or "")[:10]})
     return rows
+
+
+def trailer_rows(repo, commits):
+    """Pure: default-branch commits -> Agent-trailer adoption row (issue #32).
+    Counts the ADR-0003 `Agent: <label>` trailer and the transition form
+    `(agent:<name>)` in the subject line."""
+    with_t = 0
+    for c in commits:
+        msg = ((c.get("commit") or {}).get("message")) or ""
+        if TRAILER_RE.search(msg) or SUFFIX_RE.search(msg.split("\n", 1)[0]):
+            with_t += 1
+    total = len(commits)
+    return {"repo": repo, "total": total, "with": with_t,
+            "without": total - with_t,
+            "pct": (100 * with_t // total) if total else 0}
 
 
 def list_paginated(tok, path):
@@ -104,7 +121,29 @@ def run_audit(tok, allow):
           file=sys.stderr)
 
 
+def run_audit_trailers(tok, allow, since):
+    repos = sorted(allow) if allow else [
+        r["name"] for r in list_paginated(tok, "/orgs/%s/repos?type=all" % ORG)]
+    t = w = 0
+    for repo in repos:
+        row = trailer_rows(repo, list_paginated(
+            tok, "/repos/%s/%s/commits?since=%sT00:00:00Z" % (ORG, repo, since)))
+        print(json.dumps(row))
+        t += row["total"]
+        w += row["with"]
+    print("audit-trailers: repos=%d commits=%d with_trailer=%d (%d%%) since=%s (read-only, zero writes)"
+          % (len(repos), t, w, (100 * w // t) if t else 0, since), file=sys.stderr)
+
+
 def main(argv):
+    if "--audit-trailers" in argv:
+        allow = {argv[i + 1] for i, a in enumerate(argv) if a == "--allow" and i + 1 < len(argv)}
+        since = next((argv[i + 1] for i, a in enumerate(argv) if a == "--since" and i + 1 < len(argv)),
+                     (datetime.date.today() - datetime.timedelta(days=7)).isoformat())
+        if not DATE_RE.match(since):
+            raise SystemExit("bad --since date: %r" % since)
+        run_audit_trailers(token(), allow, since)
+        return
     if "--audit" in argv:
         allow = {argv[i + 1] for i, a in enumerate(argv) if a == "--allow" and i + 1 < len(argv)}
         run_audit(token(), allow)
