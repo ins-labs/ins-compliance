@@ -471,6 +471,8 @@ def main():
         except Exception:
             feed_meta = {"error": "feed meta unreadable"}
     dm_topics = None
+    # CONFIG_JSON is adopted ONLY from the documented trailing position (argv[8]).
+    # Any other position, even a JSON containing dm_topics, is ignored: R33 stays degraded.
     if len(sys.argv) > 8:
         try:
             cfg = json.load(open(sys.argv[8]))
@@ -478,16 +480,6 @@ def main():
                 dm_topics = cfg["dm_topics"]
         except Exception:
             dm_topics = None
-    elif len(sys.argv) > 4:
-        # Fallback check if the 4th argument (META_JSON/CONFIG_JSON) or other args contain dm_topics
-        for arg in sys.argv[4:]:
-            try:
-                cfg = json.load(open(arg))
-                if isinstance(cfg, dict) and "dm_topics" in cfg and isinstance(cfg["dm_topics"], list):
-                    dm_topics = cfg["dm_topics"]
-                    break
-            except Exception:
-                pass
 
     out = run(rules, ev, input_errors=bad + meta_err, gh_data=gh_data,
               r17_baseline=os.environ.get("R17_BASELINE") == "1", dm_topics=dm_topics)
