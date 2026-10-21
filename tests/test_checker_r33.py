@@ -71,3 +71,41 @@ class R33Test(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class R33CliConfigPositionTest(unittest.TestCase):
+    """Samir note on PR #19: dm_topics is adopted ONLY from the documented
+    trailing argv position; a JSON with dm_topics anywhere else is ignored."""
+
+    def _cli(self, meta_with_key, with_trailing_cfg):
+        import subprocess, pathlib, time
+        base = pathlib.Path(tempfile.mkdtemp())
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        rules = os.path.join(repo, "rules.yaml")
+        sha = hashlib.sha256(open(rules, "rb").read()).hexdigest()
+        ev = base / "ev.jsonl"
+        ev.write_text(json.dumps({"id": "e1", "ts": time.time(), "author": "agent",
+                                  "topic": "DMX", "kind": "msg", "text": "hi"}) + "\n")
+        meta = base / "meta.json"
+        meta.write_text(json.dumps({"skipped": {}, **({"dm_topics": ["DMX"]} if meta_with_key else {})}))
+        args = [sys.executable, os.path.join(repo, "checker.py"), rules, sha, str(ev), str(meta)]
+        if with_trailing_cfg:
+            ghmeta = base / "ghmeta.json"; ghmeta.write_text("{}")
+            cfg = base / "cfg.json"; cfg.write_text(json.dumps({"dm_topics": ["DMX"]}))
+            args += ["/dev/null", "/dev/null", str(ghmeta), str(cfg)]
+        p = subprocess.run(args, capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return json.loads(p.stdout)
+
+    def test_trailing_config_adopted(self):
+        out = self._cli(meta_with_key=False, with_trailing_cfg=True)
+        self.assertEqual(len([f for f in out["flags"] if f["rule"] == "R33"]), 1)
+        self.assertNotIn("R33", out["unproven_or_failed"])
+
+    def test_non_trailing_config_ignored_degraded(self):
+        out = self._cli(meta_with_key=True, with_trailing_cfg=False)
+        self.assertIn("R33", out["unproven_or_failed"])
+        self.assertEqual([f for f in out["flags"] if f["rule"] == "R33"], [])
+
+
+if __name__ == "__main__":
+    unittest.main()
