@@ -66,7 +66,7 @@ class SnapshotTest(unittest.TestCase):
     def test_maps_issues_and_skips_prs(self):
         http = FakeHTTP({"/events": [], "/comments": [], "/dependencies": [],
                     "/issues": [issue(), issue(number=6, pull_request={"url": "x"}), issue(number=7, labels=[])]})
-        (rows, prs), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
+        (rows, prs, _c), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
         self.assertEqual([r["number"] for r in rows], [5, 7])
         a = rows[0]
         self.assertEqual(a["repo"], "r")
@@ -81,13 +81,13 @@ class SnapshotTest(unittest.TestCase):
 
     def test_missing_due_and_blockers(self):
         http = FakeHTTP({"/events": [], "/comments": [], "/dependencies": [], "/issues": [issue(body="no meta here")]})
-        (rows, _), _ = gs.snapshot(env=self.env, repos=["r"], opener=http)
+        (rows, *_), _ = gs.snapshot(env=self.env, repos=["r"], opener=http)
         self.assertIsNone(rows[0]["due"])
         self.assertEqual(rows[0]["blocked_by"], [])
 
     def test_repo_failure_collected_and_nonzero(self):
         http = FakeHTTP({"/issues": [issue()]}, fail_paths=["bad"])
-        (rows, prs), meta = gs.snapshot(env=self.env, repos=["ok", "bad"], opener=http)
+        (rows, prs, _c), meta = gs.snapshot(env=self.env, repos=["ok", "bad"], opener=http)
         self.assertEqual(meta["repos_failed"], ["bad"])
 
     def test_refuses_world_readable_token(self):
@@ -97,12 +97,12 @@ class SnapshotTest(unittest.TestCase):
 
     def test_due_only_from_first_line(self):
         http = FakeHTTP({"/events": [], "/comments": [], "/dependencies": [], "/issues": [issue(body="intro\nDue: 2026-10-22\n")]})
-        (rows, _), _ = gs.snapshot(env=self.env, repos=["r"], opener=http)
+        (rows, *_), _ = gs.snapshot(env=self.env, repos=["r"], opener=http)
         self.assertIsNone(rows[0]["due"])
 
     def test_blocked_by_variants(self):
         http = FakeHTTP({"/events": [], "/comments": [], "/dependencies": [], "/issues": [issue(body="Due: 2026-10-21\nBlocked by #12, #13 and owner/repo#14") ]})
-        (rows, _), _ = gs.snapshot(env=self.env, repos=["r"], opener=http)
+        (rows, *_), _ = gs.snapshot(env=self.env, repos=["r"], opener=http)
         self.assertEqual(rows[0]["blocked_by"], [12, 13])
 
 
@@ -258,7 +258,7 @@ class LastEditorTest(unittest.TestCase):
             "/issues": [issue()],
         }
         http = FakeHTTP(pages)
-        (rows, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
+        (rows, *_), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
         self.assertEqual(rows[0]["last_editor"], "ins-wazen")
         self.assertEqual(meta.get("editor_failed", 0), 0)
 
@@ -271,7 +271,7 @@ class LastEditorTest(unittest.TestCase):
             "/issues/5/dependencies": [],
             "/issues": [issue()],
         }
-        (rows, _), _ = gs.snapshot(env=self.env, repos=["r"], opener=FakeHTTP(pages))
+        (rows, *_), _ = gs.snapshot(env=self.env, repos=["r"], opener=FakeHTTP(pages))
         self.assertEqual(rows[0]["last_editor"], "ins-dina")
 
     def test_editor_falls_back_to_author(self):
@@ -281,13 +281,13 @@ class LastEditorTest(unittest.TestCase):
             "/issues/5/dependencies": [],
             "/issues": [issue(user={"login": "ins-sherbeeny"})],
         }
-        (rows, _), _ = gs.snapshot(env=self.env, repos=["r"], opener=FakeHTTP(pages))
+        (rows, *_), _ = gs.snapshot(env=self.env, repos=["r"], opener=FakeHTTP(pages))
         self.assertEqual(rows[0]["last_editor"], "ins-sherbeeny")
 
     def test_editor_failure_tolerated(self):
         pages = {"/issues/5/dependencies": [], "/issues": [issue()]}
         http = FakeHTTP(pages, fail_paths=["/events", "/comments"])
-        (rows, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
+        (rows, *_), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
         self.assertIsNone(rows[0]["last_editor"])
         self.assertEqual(meta["editor_failed"], 1)
 
@@ -313,7 +313,7 @@ class NativeBlockedByTest(unittest.TestCase):
             "/issues/5/events": [], "/issues/5/comments": [],
             "/issues": [issue(body="Due: 2026-10-21")],
         }
-        (rows, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=FakeHTTP(pages))
+        (rows, *_), meta = gs.snapshot(env=self.env, repos=["r"], opener=FakeHTTP(pages))
         r = rows[0]
         self.assertEqual(r["blocked_by"], [12, 44])
         # 44 closed per the fresh per-issue GET (link-listing states are never trusted)
@@ -326,7 +326,7 @@ class NativeBlockedByTest(unittest.TestCase):
                  "/issues/6/events": [], "/issues/6/comments": [],
                  "/issues": [issue(number=5), issue(number=6)]}
         http = FakeHTTP(pages, fail_paths={"/dependencies": 404})
-        (rows, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
+        (rows, *_), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
         self.assertEqual(meta.get("blocked_native"), "unsupported")
         self.assertEqual(len([u for u in http.urls if "/dependencies/" in u]), 1)
 
@@ -336,7 +336,7 @@ class NativeBlockedByTest(unittest.TestCase):
                  "/issues/6/dependencies/blocked_by": [{"number": 9, "state": "open"}],
                  "/issues": [issue(number=5), issue(number=6)]}
         http = FakeHTTP(pages, fail_paths={"/issues/5/dependencies": 500})
-        (rows, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
+        (rows, *_), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
         self.assertEqual(meta.get("blocked_native"), "rest")
         self.assertEqual(meta.get("deps_failed"), 1)
         self.assertEqual(rows[1]["blocked_by"], [9, 12])  # issue 6 still probed (body ref 12 + native 9)
@@ -348,7 +348,7 @@ class NativeBlockedByTest(unittest.TestCase):
             "/issues/12": {"number": 12, "state": "closed"},
             "/issues": [issue(body="Due: 2026-10-21\nBlocked by #12")],
         }
-        (rows, _), _ = gs.snapshot(env=self.env, repos=["r"], opener=FakeHTTP(pages))
+        (rows, *_), _ = gs.snapshot(env=self.env, repos=["r"], opener=FakeHTTP(pages))
         r = rows[0]
         self.assertEqual(r["blocked_by"], [12, 13])
         self.assertEqual(r["blocked_by_closed"], [12])
@@ -407,7 +407,7 @@ class ProjectFieldsTest(unittest.TestCase):
 
     def test_project_fields_merge(self):
         http = self.http_with_project(project_pages())
-        (rows, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
+        (rows, *_), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
         r = rows[0]
         self.assertEqual(r["status"], "In progress")
         self.assertEqual(r["due"], "2026-10-22")       # project Due fills the gap
@@ -422,7 +422,7 @@ class ProjectFieldsTest(unittest.TestCase):
         http = self.http_with_project(project_pages())
         base_issue = issue()  # has body Due: 2026-10-21
         http.pages["/issues"] = [base_issue]
-        (rows, _), _ = gs.snapshot(env=self.env, repos=["r"], opener=http)
+        (rows, *_), _ = gs.snapshot(env=self.env, repos=["r"], opener=http)
         self.assertEqual(rows[0]["due"], "2026-10-21")
         self.assertEqual(rows[0]["due_source"], "body")
 
@@ -431,7 +431,7 @@ class ProjectFieldsTest(unittest.TestCase):
         pages = {"/issues/5/dependencies/blocked_by": [],
                  "/issues/5/events": [], "/issues/5/comments": [],
                  "/issues": [issue(body="no due here")]}
-        (rows, _), meta = gs.snapshot(env=env, repos=["r"], opener=FakeHTTP(pages))
+        (rows, *_), meta = gs.snapshot(env=env, repos=["r"], opener=FakeHTTP(pages))
         r = rows[0]
         self.assertIsNone(r["status"])
         self.assertIsNone(r["due"])
@@ -440,14 +440,14 @@ class ProjectFieldsTest(unittest.TestCase):
     def test_project_error_keeps_class_status_no_body(self):
         # issue #7: meta keeps the error class/status only - no response body.
         http = self.http_with_project([])  # every graphql call fails
-        (_, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
+        (*_, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
         self.assertEqual(meta.get("project"), "error")
         self.assertEqual(meta.get("project_error"), "GhError status=500")
         self.assertNotIn("bad graphql", meta.get("project_error", ""))
 
     def test_project_not_found(self):
         http = self.http_with_project(project_pages(project_title="something-else"))
-        (rows, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
+        (rows, *_), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
         self.assertEqual(meta.get("project"), "not_found")
         self.assertIsNone(rows[0]["status"])
 
@@ -503,7 +503,7 @@ class SnapshotCacheTest(unittest.TestCase):
 
     def test_first_run_fetches_and_writes_cache(self):
         http = FakeHTTP(self.pages())
-        (rows, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
+        (rows, *_), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
         self.assertEqual(meta["editor_cached"], 0)
         self.assertEqual(meta["deps_cached"], 0)
         cache = json.load(open(self.state))
@@ -516,7 +516,7 @@ class SnapshotCacheTest(unittest.TestCase):
     def test_second_run_uses_cache(self):
         gs.snapshot(env=self.env, repos=["r"], opener=FakeHTTP(self.pages()))
         http2 = FakeHTTP(self.pages())
-        (rows, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http2)
+        (rows, *_), meta = gs.snapshot(env=self.env, repos=["r"], opener=http2)
         self.assertEqual(meta["editor_cached"], 1)
         self.assertEqual(meta["deps_cached"], 1)
         self.assertEqual([u for u in http2.urls if "/events" in u or "/dependencies/" in u], [])
@@ -528,13 +528,13 @@ class SnapshotCacheTest(unittest.TestCase):
         p = self.pages()
         p["/issues"] = [issue(updated_at="2026-10-20T11:00:00Z")]
         http2 = FakeHTTP(p)
-        (_, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http2)
+        (*_, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http2)
         self.assertEqual(meta["editor_cached"], 0)
         self.assertEqual(meta["deps_cached"], 0)
 
     def test_missing_state_file_is_cold_cache(self):
         env = {"GH_TOKEN_FILE": self.tok, "GH_SNAPSHOT_STATE": os.path.join(self.tmp, "nope.json")}
-        (_, _), meta = gs.snapshot(env=env, repos=["r"], opener=FakeHTTP(self.pages()))
+        (*_, _), meta = gs.snapshot(env=env, repos=["r"], opener=FakeHTTP(self.pages()))
         self.assertEqual(meta["editor_cached"], 0)
 
 
@@ -558,7 +558,7 @@ class TrailerTest(unittest.TestCase):
                  "/issues/5/dependencies": [],
                  "/commits/abc123": {"commit": {"message": "Fix thing\n\nCo-authored-by: dina <d@x>"}},
                  "/issues": [issue()]}
-        (rows, _), _ = gs.snapshot(env=self.env, repos=["r"], opener=FakeHTTP(pages))
+        (rows, *_), _ = gs.snapshot(env=self.env, repos=["r"], opener=FakeHTTP(pages))
         self.assertEqual(rows[0]["last_editor"], "ins-sherbeeny")
         self.assertEqual(rows[0]["last_editor_trailer"], "dina")
 
@@ -569,7 +569,7 @@ class TrailerTest(unittest.TestCase):
                  "/issues/5/dependencies": [],
                  "/commits/abc123": {"commit": {"message": "Fix thing\nOwner: wazen"}},
                  "/issues": [issue()]}
-        (rows, _), _ = gs.snapshot(env=self.env, repos=["r"], opener=FakeHTTP(pages))
+        (rows, *_), _ = gs.snapshot(env=self.env, repos=["r"], opener=FakeHTTP(pages))
         self.assertEqual(rows[0]["last_editor_trailer"], "wazen")
 
     def test_no_trailer_when_newest_is_comment(self):
@@ -579,7 +579,7 @@ class TrailerTest(unittest.TestCase):
                                           "user": {"login": "ins-wazen"}}],
                  "/issues/5/dependencies": [],
                  "/issues": [issue()]}
-        (rows, _), _ = gs.snapshot(env=self.env, repos=["r"], opener=FakeHTTP(pages))
+        (rows, *_), _ = gs.snapshot(env=self.env, repos=["r"], opener=FakeHTTP(pages))
         self.assertEqual(rows[0]["last_editor"], "ins-wazen")
         self.assertIsNone(rows[0]["last_editor_trailer"])
 
@@ -622,13 +622,13 @@ class CachedBlockerStateTest(unittest.TestCase):
                 "/issues/5/dependencies/blocked_by": [{"number": 31, "state": "open"}],
                 "/issues/31": {"number": 31, "state": "open"},
                 "/issues": [issue(body="Due: 2026-10-21")]}
-        (rows, _), _ = gs.snapshot(env=self.env, repos=["r"], opener=FakeHTTP(dict(base)))
+        (rows, *_), _ = gs.snapshot(env=self.env, repos=["r"], opener=FakeHTTP(dict(base)))
         self.assertEqual(rows[0]["blocked_by_closed"], [])
         # blocker closes without the blocked issue changing
         second = dict(base)
         second["/issues/31"] = {"number": 31, "state": "closed"}
         http2 = FakeHTTP(second)
-        (rows, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http2)
+        (rows, *_), meta = gs.snapshot(env=self.env, repos=["r"], opener=http2)
         self.assertEqual(meta["deps_cached"], 1)          # cache hit, no deps call
         self.assertEqual([u for u in http2.urls if "/dependencies/" in u], [])
         self.assertEqual(rows[0]["blocked_by_closed"], [31])
@@ -660,7 +660,7 @@ class CrossRepoBlockedByTest(unittest.TestCase):
         }
 
     def test_cross_repo_open_blocker_no_false_v6(self):
-        (rows, _), _ = gs.snapshot(env=self.env, repos=["a"], org="org",
+        (rows, *_), _ = gs.snapshot(env=self.env, repos=["a"], org="org",
                                    opener=FakeHTTP(self.pages("open")))
         r = rows[0]
         self.assertEqual(r["blocked_by"], [])               # foreign number stays out
@@ -669,7 +669,7 @@ class CrossRepoBlockedByTest(unittest.TestCase):
         self.assertEqual(r["blocked_by_closed"], [])        # b#5 is OPEN in repo b
 
     def test_cross_repo_closed_blocker_flagged_qualified(self):
-        (rows, _), _ = gs.snapshot(env=self.env, repos=["a"], org="org",
+        (rows, *_), _ = gs.snapshot(env=self.env, repos=["a"], org="org",
                                    opener=FakeHTTP(self.pages("closed")))
         r = rows[0]
         self.assertEqual(r["blocked_by"], [])
@@ -681,7 +681,7 @@ class CrossRepoBlockedByTest(unittest.TestCase):
             {"number": 7, "state": "open",
              "repository_url": "https://api.github.com/repos/other/c"}]
         pages["/repos/other/c/issues/7"] = {"number": 7, "state": "closed"}
-        (rows, _), _ = gs.snapshot(env=self.env, repos=["a"], org="org",
+        (rows, *_), _ = gs.snapshot(env=self.env, repos=["a"], org="org",
                                    opener=FakeHTTP(pages))
         r = rows[0]
         self.assertEqual(r["blocked_by_cross"], ["other/c#7"])
@@ -716,13 +716,13 @@ class DepsCacheAgeTest(unittest.TestCase):
     def test_fresh_cache_hit(self):
         self.seed(1800)
         http = FakeHTTP(self.pages())
-        (_, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
+        (*_, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
         self.assertEqual(meta["deps_cached"], 1)
         self.assertEqual([u for u in http.urls if "/dependencies/" in u], [])
 
     def test_stale_cache_refetches(self):
         self.seed(3700)
         http = FakeHTTP(self.pages())
-        (_, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
+        (*_, _), meta = gs.snapshot(env=self.env, repos=["r"], opener=http)
         self.assertEqual(meta["deps_cached"], 0)
         self.assertEqual(len([u for u in http.urls if "/dependencies/" in u]), 1)

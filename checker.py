@@ -152,7 +152,7 @@ def github_issue_hygiene(rule, gh_data, now, baseline=False):
     if not reg_shared:
         reg_shared = {"ins-sherbeeny", "ins-agent"}
     out_flags = []
-    vcount = {i: 0 for i in range(1, 11)}
+    vcount = {i: 0 for i in range(1, 12)}
 
     def flag(ident, v, age_min=0, note=None):
         f = _flag(rule, rule["owner"], ident, age_min, v)
@@ -256,6 +256,16 @@ def github_issue_hygiene(rule, gh_data, now, baseline=False):
             ages = [(now - r["updated_ts"]) / 60 for r in rows]
             if ages and min(ages) > n_min:
                 flag(agent, 8, min(ages))
+    # V11 (ins-infra #496, ADR-0003): new default-branch commits from shared or
+    # registered agent logins must carry Agent attribution (trailer or
+    # transition suffix resolving to a registry label). Report-only until the
+    # broadcast switch date.
+    for c in gh_data.get("commits", []):
+        a = str(c.get("author") or "").lower()
+        if a in reg_shared or a in reg_logins:
+            lab = resolve_token(c.get("agent")) if c.get("agent") else None
+            if not lab:
+                flag("%s:%s" % (c["repo"], str(c.get("sha") or "")[:8]), 11, note="report_only")
     for pr in prs:
         if not pr.get("has_issue_ref"):
             flag("%s:%s" % (pr["repo"], pr["number"]), 9, (now - pr.get("updated_ts", now)) / 60)
@@ -445,10 +455,11 @@ def main():
     gh_data = None
     if len(sys.argv) > 5:
         try:
-            issues, prs = [], []
+            issues, prs, commits = [], [], []
             for line in open(sys.argv[5]):
                 row = json.loads(line)
-                (issues if row.get("kind") == "issue" else prs).append(row)
+                (issues if row.get("kind") == "issue"
+                 else commits if row.get("kind") == "commit" else prs).append(row)
             registry = None
             if len(sys.argv) > 6:
                 try:
@@ -460,7 +471,7 @@ def main():
             if registry is None:
                 gh_data = None  # no trustworthy registry: R17 stays unproven (DEGRADED), never clean
             else:
-                gh_data = {"issues": issues, "prs": prs, "registry": registry}
+                gh_data = {"issues": issues, "prs": prs, "commits": commits, "registry": registry}
         except Exception:
             raise SystemExit("gh snapshot unreadable")
     feed_meta = None

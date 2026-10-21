@@ -154,6 +154,38 @@ def parse_owner(body):
     return m.group(1).strip() if m else None
 
 
+AGENT_TRAILER_RE = re.compile(r"^Agent: (\S+)\s*$")
+SUFFIX_AGENT_RE = re.compile(r"\(agent:([A-Za-z0-9_-]+)\)")
+
+
+def parse_commit_attribution(message):
+    """(label, form) from a commit message (ins-infra #496, ADR-0003).
+    form is "trailer" (canonical `Agent: <label>` own line, last match wins)
+    or "suffix" (transition `(agent:<name>)` in the subject). (None, None)
+    when neither is present."""
+    label = None
+    for line in (message or "").splitlines():
+        m = AGENT_TRAILER_RE.match(line)
+        if m:
+            label = m.group(1)
+    if label:
+        return label, "trailer"
+    m = SUFFIX_AGENT_RE.search((message or "").splitlines()[0] if message else "")
+    if m:
+        return m.group(1), "suffix"
+    return None, None
+
+
+def commit_row(repo, c):
+    """Minimal commit row: ids + parsed attribution only, never the message."""
+    msg = ((c.get("commit") or {}).get("message")) or ""
+    lab, form = parse_commit_attribution(msg)
+    date = (((c.get("commit") or {}).get("committer") or {}).get("date")) or "1970-01-01T00:00:00Z"
+    return {"kind": "commit", "repo": repo, "sha": c.get("sha"), "ts": to_epoch(date),
+            "author": (c.get("author") or {}).get("login"),
+            "agent": lab, "attr_form": form}
+
+
 def agent_of(labels):
     for name in labels:
         if name.startswith("agent:"):
@@ -365,7 +397,7 @@ def snapshot(env=None, repos=None, org=ORG, opener=None, gh=None):
     state_path = env.get("GH_SNAPSHOT_STATE")
     cache = load_cache(state_path) if state_path else {}
     new_cache = {}
-    rows, prs, failed = [], [], []
+    rows, prs, failed, commits, commits_failed = [], [], [], [], []
     editor_failed = editor_cached = deps_failed = deps_cached = 0
     blocked_native = "rest"
     for repo in repos:
@@ -389,6 +421,31 @@ def snapshot(env=None, repos=None, org=ORG, opener=None, gh=None):
             rows.append(row)
             by_number[it["number"]] = (row, it)
             open_numbers.add(it["number"])
+        # Agent-trailer feed (ins-infra #496): new default-branch commits since
+        # the cached watermark, deduped by sha. Failure here never fails the
+        # repo: attribution is report-only in the transition phase.
+        try:
+            ckey = "commits:" + repo
+            cent = cache.get(ckey) or {}
+            seen = set(cent.get("seen") or [])
+            since = cent.get("since") or time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 86400))
+            newest = None
+            for c in list_paginated(gh, f"/repos/{org}/{repo}/commits?since={since}"):
+                if c.get("sha") in seen:
+                    continue
+                commits.append(commit_row(repo, c))
+                seen.add(c.get("sha"))
+                d = ((c.get("commit") or {}).get("committer") or {}).get("date")
+                if d and (newest is None or d > newest):
+                    newest = d
+            nc = dict(cent)
+            if newest:
+                nc["since"] = newest
+            nc["seen"] = sorted(seen)[-500:]
+            new_cache[ckey] = nc
+        except GhError:
+            commits_failed.append(repo)
         for number, (row, it) in by_number.items():
             key = "%s:%s" % (repo, number)
             ent = cache.get(key) or {}
@@ -495,12 +552,13 @@ def snapshot(env=None, repos=None, org=ORG, opener=None, gh=None):
     meta = {"repos_failed": failed, "repos_ok": [r for r in repos if r not in failed],
             "issues_seen": len(rows), "prs_seen": len(prs),
             "project": project_state, "blocked_native": blocked_native,
+            "commits_seen": len(commits), "commits_failed": commits_failed,
             "editor_failed": editor_failed, "editor_cached": editor_cached,
             "deps_failed": deps_failed, "deps_cached": deps_cached,
             "project_pages_capped": project_capped}
     if project_error:
         meta["project_error"] = project_error
-    return (rows, prs), meta
+    return (rows, prs, commits), meta
 
 
 def main(argv):
@@ -509,7 +567,7 @@ def main(argv):
         return 2
     meta_path = argv[1]
     repos = argv[2:] or None
-    (rows, prs), meta = snapshot(repos=repos)
+    (rows, prs, commits), meta = snapshot(repos=repos)
     detail = (" project_error=%s" % meta["project_error"]) if meta.get("project_error") else ""
     print("gh_snapshot: project=%s blocked_native=%s editor_failed=%d deps_failed=%d repos_failed=%d%s"
           % (meta["project"], meta["blocked_native"], meta["editor_failed"],
@@ -523,6 +581,8 @@ def main(argv):
     for pr in prs:
         pr["kind"] = "pr"
         print(json.dumps(pr, ensure_ascii=False))
+    for c in commits:
+        print(json.dumps(c, ensure_ascii=False))
     return 1 if meta["repos_failed"] else 0
 
 
