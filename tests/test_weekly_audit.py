@@ -46,3 +46,16 @@ class AggregateTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class MisattrSplitTest(unittest.TestCase):
+    def test_misattr_rows_split_out(self):
+        rows = [
+            {"repo": "a", "total": 4, "with": 2, "without": 2, "pct": 50},
+            {"repo": "ins-compliance", "sha": "51e0939d", "pr": 33,
+             "trailer": "gawaher", "branch_agent": "karim"},
+        ]
+        rep = weekly_audit.aggregate([], rows, since="2026-10-15")
+        assert rep["trailers"]["total"] == 4
+        assert rep["misattributed"] == 1
+        assert rep["misattributed_rows"][0]["trailer"] == "gawaher"
+        assert len(rep["trailer_rows"]) == 1

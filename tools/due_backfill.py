@@ -28,6 +28,46 @@ TRAILER_RE = re.compile(r"^Agent:\s*\S+\s*$", re.M)
 SUFFIX_RE = re.compile(r"\(agent:[a-z0-9-]+\)")
 
 
+
+PRNUM_RE = re.compile(r"\(#(\d+)\)\s*$")
+
+
+def _norm_agent(label):
+    """Normalize an agent label: strip one leading 'agent:' prefix."""
+    return label.split(":", 1)[1] if label.startswith("agent:") else label
+
+
+def pr_number(subject):
+    """Pure: squash-merge subject -> PR number, or None (issue #36)."""
+    m = PRNUM_RE.search(subject)
+    return int(m.group(1)) if m else None
+
+
+def trailer_label(msg):
+    """Pure: commit message -> normalized Agent trailer label, or None."""
+    m = re.search(r"^Agent:\s*(\S+)\s*$", msg, re.M)
+    return _norm_agent(m.group(1)) if m else None
+
+
+def branch_agent(branch):
+    """Pure: PR head branch -> owner prefix, or None for unowned names."""
+    parts = (branch or "").split("/", 1)
+    return parts[0] if len(parts) == 2 and parts[0] else None
+
+
+def misattr_row(repo, sha, msg, branch):
+    """Pure: squash-merge commit + its PR head branch -> mismatch row or
+    None (issue #36). Only flags when all three facts exist and differ:
+    a PR-numbered subject, an Agent trailer, an owned branch prefix."""
+    subject = msg.split("\n", 1)[0]
+    pr = pr_number(subject)
+    label = trailer_label(msg)
+    agent = branch_agent(branch)
+    if pr is None or label is None or agent is None or label == agent:
+        return None
+    return {"repo": repo, "sha": sha[:8], "pr": pr,
+            "trailer": label, "branch_agent": agent}
+
 def insert_due(body, date):
     """Return body with a first-line Due prepended, or None if one exists.
     The original body is preserved byte-for-byte after the new first line."""
@@ -124,15 +164,30 @@ def run_audit(tok, allow):
 def run_audit_trailers(tok, allow, since):
     repos = sorted(allow) if allow else [
         r["name"] for r in list_paginated(tok, "/orgs/%s/repos?type=all" % ORG)]
-    t = w = 0
+    t = w = m = 0
     for repo in repos:
-        row = trailer_rows(repo, list_paginated(
-            tok, "/repos/%s/%s/commits?since=%sT00:00:00Z" % (ORG, repo, since)))
+        commits = list_paginated(
+            tok, "/repos/%s/%s/commits?since=%sT00:00:00Z" % (ORG, repo, since))
+        row = trailer_rows(repo, commits)
         print(json.dumps(row))
         t += row["total"]
         w += row["with"]
-    print("audit-trailers: repos=%d commits=%d with_trailer=%d (%d%%) since=%s (read-only, zero writes)"
-          % (len(repos), t, w, (100 * w // t) if t else 0, since), file=sys.stderr)
+        for c in commits:
+            msg = ((c.get("commit") or {}).get("message")) or ""
+            pr = pr_number(msg.split("\n", 1)[0])
+            if pr is None or trailer_label(msg) is None:
+                continue
+            try:
+                head = (gh("GET", "/repos/%s/%s/pulls/%d" % (ORG, repo, pr), tok)
+                        .get("head") or {}).get("ref") or ""
+            except Exception:
+                continue
+            bad = misattr_row(repo, c.get("sha") or "", msg, head)
+            if bad:
+                print(json.dumps(bad))
+                m += 1
+    print("audit-trailers: repos=%d commits=%d with_trailer=%d (%d%%) misattributed=%d since=%s (read-only, zero writes)"
+          % (len(repos), t, w, (100 * w // t) if t else 0, m, since), file=sys.stderr)
 
 
 def main(argv):
