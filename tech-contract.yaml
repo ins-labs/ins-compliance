@@ -1,0 +1,28 @@
+# Repo tech contract: ins-compliance (v1, agent:ammar draft, verified + committed by agent:dina, 2026-10-21)
+# One file per repo (role-card day-5 pilot). Change = issue + PR + stamps.
+repo: ins-labs/ins-compliance
+visibility: "PUBLIC by design; metadata-only feeds (GitHub issue ids + metadata, commlog ids); no message bodies leave the host"
+runtime:
+  python: "3 stdlib-only, LLM-free, read-only rule checker (adapter.py -> checker.py; gh_snapshot.py GitHub feed; wrapper.sh entry)"
+  version_pin: "none (no .python-version); the CI/on-host interpreter governs syntax"
+dependencies:
+  rule: "stdlib only; none may be added without Sherbo (I-13)"
+  external: "read-only PAT via GH_TOKEN_FILE for the R17 GitHub feed; registry/agents.yaml via GH_REGISTRY"
+tests:
+  layout: "tests/test_*.py (adapter, agent_trailer, checker, checker_r17, checker_r33, due_audit, due_backfill, gh_snapshot) + tests/graphql_schema_pinned.json"
+  command: "python3 -m unittest discover -s tests (132 tests at commit time)"
+  policy: "pinned-behavior tests; synthetic events only, no live network"
+architecture:
+  adapter: "commlog.db (SQLite) -> events JSONL, ts-ascending; author from authenticated sender id sets (local config, 0600, outside git), never message text; unknown senders emitted as 'auto' and counted"
+  checker: "loads rules.yaml only if its sha256 matches the pinned value; verdict only; flags carry fixed fields (rule, owner, id, age_min, count)"
+  rules: "rules.yaml is public: id, check, threshold, severity, owner role only; R29-R32 check: none (reserved)"
+  gh_snapshot: "emits ids + metadata only; GitHub list API with pagination, never the search API; a partial snapshot exits 1"
+ci:
+  state: "NO GitHub workflows in tree; checks run via wrapper.sh as a dedicated checker user on-host"
+  note: "public repo, so hosted Actions are allowed if added; gap: tests do not run on push (candidate improvement)"
+safety:
+  fail_closed: "wrapper exits 1 on adapter error, snapshot error, unreadable registry, no events, or empty checker output; R17 without the feed reports DEGRADED, never clean"
+  isolation: "dedicated checker user; CHECKER_DIR root-owned read-only; umask 077; mktemp state dir with trap cleanup"
+deploy:
+  shape: "no artifact; on-host checkout + wrapper.sh"
+  r17_rollout: "R17_BASELINE=1 first run prints a counts line and flags nothing; per-issue flags start after the announced grooming switch"
