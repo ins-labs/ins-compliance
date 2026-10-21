@@ -6,11 +6,11 @@ def mk():
     now = datetime.datetime.now(datetime.timezone.utc)
     def ts(m): return (now - datetime.timedelta(minutes=m)).isoformat()
     c.executemany("INSERT INTO messages(ts,channel,direction,peer,conversation,sender,body,source_ref,raw_json) VALUES(?,?,?,?,?,?,?,?,?)", [
-        (ts(10), "tg", "in", None, "246186", "U1", "hi", "tg:1", "{}"),
-        (ts(9), "tg", "out", None, "246186", "A1", "First decision: x\nPick: A 60%", "tg:2", "{}"),
-        (ts(8), "tg", "in", None, "246186", "X9", "who", "tg:3", "{}"),
+        (ts(10), "tg", "in", None, "DM_TEST_TOPIC_1", "U1", "hi", "tg:1", "{}"),
+        (ts(9), "tg", "out", None, "DM_TEST_TOPIC_1", "A1", "First decision: x\nPick: A 60%", "tg:2", "{}"),
+        (ts(8), "tg", "in", None, "DM_TEST_TOPIC_1", "X9", "who", "tg:3", "{}"),
         (ts(7), "dm", "in", None, "d", "U1", "dm", "tg:4", "{}"),
-        (ts(6), "tg", "out", None, "246186", "A1", "ok", "bad id!", "{}")])
+        (ts(6), "tg", "out", None, "DM_TEST_TOPIC_1", "A1", "ok", "bad id!", "{}")])
     c.commit(); return p
 CFG = {"user_senders": ["U1"], "agent_senders": ["A1"], "auto_senders": [], "group_channels": ["tg", "telegram"]}
 def test_map():
@@ -67,7 +67,7 @@ def test_config_perms():
 def test_unknown_sender_secret_scanned():
     p = mk(); c = sqlite3.connect(p)
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    c.execute("INSERT INTO messages(ts,channel,direction,conversation,sender,body,source_ref,raw_json) VALUES(?,?,?,?,?,?,?,?)", (now, "tg", "in", "246186", "ZZ", "ghp_" + "C" * 30, "tg:77", "{}"))
+    c.execute("INSERT INTO messages(ts,channel,direction,conversation,sender,body,source_ref,raw_json) VALUES(?,?,?,?,?,?,?,?)", (now, "tg", "in", "DM_TEST_TOPIC_1", "ZZ", "ghp_" + "C" * 30, "tg:77", "{}"))
     c.commit()
     ev, sk = a.events(p, CFG)
     import checker
