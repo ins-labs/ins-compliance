@@ -1,5 +1,7 @@
 """Registry-aware misattribution (issue #38): labels + aliases come from
 ins-infra registry/agents.yaml; non-agent prefixes/labels are skipped."""
+import contextlib
+import io
 import os
 import sys
 import unittest
@@ -65,3 +67,20 @@ class RegistryAwareTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class EmptyRegistryWarnTest(unittest.TestCase):
+    def test_fetch_ok_empty_parse_warns(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            agents, fetched = db.load_registry(lambda: "agents:\n")
+        assert fetched is True
+        assert agents == set()
+        assert "WARNING" in err.getvalue()
+
+    def test_fetch_failure_no_warn_and_fallback(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            agents, fetched = db.load_registry(lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+        assert fetched is False
+        assert agents is None
+        assert "WARNING" not in err.getvalue()
