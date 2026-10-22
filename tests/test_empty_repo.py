@@ -31,3 +31,27 @@ class EmptyRepo(unittest.TestCase):
         rows = [{'sha': 'abc', 'commit': {'message': 'hi'}}]
         with patch.object(db, 'list_paginated', return_value=rows):
             self.assertEqual(db.repo_commits('token', 'repo', '2026-10-15'), rows)
+
+
+class Unexpected409Bodies(unittest.TestCase):
+    def test_unexpected_bodies_remain_http_errors(self):
+        bodies = [
+            b'not JSON',
+            b'{"message":',
+            b'\xff',
+            b'null',
+            b'[]',
+            b'"Git Repository is empty."',
+            b'{}',
+            b'{"message": null}',
+            b'{"message": "A different conflict"}',
+        ]
+        for body in bodies:
+            with self.subTest(body=body):
+                error = urllib.error.HTTPError(
+                    'https://api.github.com/test', 409, 'Conflict', {},
+                    io.BytesIO(body))
+                with patch.object(db, 'list_paginated', side_effect=error):
+                    with self.assertRaises(urllib.error.HTTPError) as raised:
+                        db.repo_commits('token', 'repo', '2026-10-15')
+                self.assertIs(raised.exception, error)
