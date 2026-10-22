@@ -37,6 +37,24 @@ def _norm_agent(label):
     return label.split(":", 1)[1] if label.startswith("agent:") else label
 
 
+
+def parse_agents_yaml(text):
+    """Pure: registry/agents.yaml text -> set of agent labels + aliases
+    (issue #38). Only the agents: section is read; github_logins entries
+    are shared logins, not agents. Flow-style rows, stdlib regex only."""
+    agents = set()
+    m = re.search(r"(?ms)^agents:\s*\n(.*?)^\S", text)
+    if not m:
+        return agents
+    for row in m.group(1).splitlines():
+        lm = re.search(r"label:\s*([a-z0-9-]+)", row)
+        if lm:
+            agents.add(lm.group(1))
+        am = re.search(r"aliases:\s*\[([^\]]*)\]", row)
+        if am:
+            agents.update(a.strip() for a in am.group(1).split(",") if a.strip())
+    return agents
+
 def pr_number(subject):
     """Pure: squash-merge subject -> PR number, or None (issue #36)."""
     m = PRNUM_RE.search(subject)
@@ -49,21 +67,29 @@ def trailer_label(msg):
     return _norm_agent(m.group(1)) if m else None
 
 
-def branch_agent(branch):
-    """Pure: PR head branch -> owner prefix, or None for unowned names."""
+def branch_agent(branch, agents=None):
+    """Pure: PR head branch -> owner prefix, or None for unowned names.
+    With a registry set, only known agent labels count (issue #38)."""
     parts = (branch or "").split("/", 1)
-    return parts[0] if len(parts) == 2 and parts[0] else None
+    if len(parts) != 2 or not parts[0]:
+        return None
+    if agents is not None and parts[0] not in agents:
+        return None
+    return parts[0]
 
 
-def misattr_row(repo, sha, msg, branch):
+def misattr_row(repo, sha, msg, branch, agents=None):
     """Pure: squash-merge commit + its PR head branch -> mismatch row or
     None (issue #36). Only flags when all three facts exist and differ:
-    a PR-numbered subject, an Agent trailer, an owned branch prefix."""
+    a PR-numbered subject, an Agent trailer, an owned branch prefix.
+    With a registry set, non-agent trailers/prefixes are skipped (#38)."""
     subject = msg.split("\n", 1)[0]
     pr = pr_number(subject)
     label = trailer_label(msg)
-    agent = branch_agent(branch)
+    agent = branch_agent(branch, agents)
     if pr is None or label is None or agent is None or label == agent:
+        return None
+    if agents is not None and label not in agents:
         return None
     return {"repo": repo, "sha": sha[:8], "pr": pr,
             "trailer": label, "branch_agent": agent}
@@ -165,6 +191,13 @@ def run_audit_trailers(tok, allow, since):
     repos = sorted(allow) if allow else [
         r["name"] for r in list_paginated(tok, "/orgs/%s/repos?type=all" % ORG)]
     t = w = m = 0
+    agents = None
+    try:
+        raw = gh("GET", "/repos/%s/ins-infra/contents/registry/agents.yaml" % ORG, tok)
+        import base64
+        agents = parse_agents_yaml(base64.b64decode(raw["content"]).decode())
+    except Exception:
+        agents = None  # fall back to flag-without-registry
     for repo in repos:
         commits = list_paginated(
             tok, "/repos/%s/%s/commits?since=%sT00:00:00Z" % (ORG, repo, since))
@@ -182,7 +215,7 @@ def run_audit_trailers(tok, allow, since):
                         .get("head") or {}).get("ref") or ""
             except Exception:
                 continue
-            bad = misattr_row(repo, c.get("sha") or "", msg, head)
+            bad = misattr_row(repo, c.get("sha") or "", msg, head, agents)
             if bad:
                 print(json.dumps(bad))
                 m += 1
