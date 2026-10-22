@@ -59,3 +59,50 @@ class CheckPrBodyTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LabelsFileTest(unittest.TestCase):
+    def _write(self, text):
+        import tempfile
+        fd, path = tempfile.mkstemp()
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+        self.addCleanup(os.unlink, path)
+        return path
+
+    def test_registry_yaml_flow_style(self):
+        import argparse
+        path = self._write('agents:\n  - {label: nader, name: "Nader"}\n  - {label: karim, name: "Karim"}\n')
+        args = argparse.Namespace(labels=None, labels_file=path)
+        self.assertEqual(atc._load_labels(args), ["karim", "nader"])
+
+    def test_agent_prefixed_labels_normalized(self):
+        import argparse
+        path = self._write('["agent:karim", "agent:dina"]')
+        args = argparse.Namespace(labels=None, labels_file=path)
+        labels = atc._load_labels(args)
+        self.assertIn("karim", labels)
+        self.assertNotIn("agent:karim", labels)
+
+    def test_branch_matches_stripped_label(self):
+        self.assertEqual(atc.label_from_branch("karim/work", ["agent:karim"]), "karim")
+
+
+class RepoDefaultLabelsTest(unittest.TestCase):
+    def test_newline_list_labels_file(self):
+        import argparse, tempfile
+        fd, path = tempfile.mkstemp()
+        with os.fdopen(fd, "w") as fh:
+            fh.write("dina\nkarim\n")
+        self.addCleanup(os.unlink, path)
+        args = argparse.Namespace(labels=None, labels_file=path)
+        self.assertEqual(atc._load_labels(args), ["dina", "karim"])
+
+    def test_default_labels_file_is_repo_committed(self):
+        # No flags: the checker must read the repo-committed labels file so the
+        # workflow needs no token and no network (Khazen review on PR #47).
+        import argparse
+        args = argparse.Namespace(labels=None, labels_file=None)
+        labels = atc._load_labels(args)
+        self.assertIn("karim", labels)
+        self.assertIn("dina", labels)

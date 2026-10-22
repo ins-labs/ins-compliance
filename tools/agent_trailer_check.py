@@ -9,9 +9,15 @@ CLI:
     python3 tools/agent_trailer_check.py --body-file BODY --branch HEAD_BRANCH --labels karim,dina,...
     python3 tools/agent_trailer_check.py --event-path GITHUB_EVENT_PATH --labels-file registry.json
 """
-import argparse, json, re, sys
+import argparse, json, os, re, sys
 
 TRAILER_RE = re.compile(r"^[ \t]*agent[ \t]*:[ \t]*([A-Za-z0-9_-]+)[ \t]*$", re.IGNORECASE | re.MULTILINE)
+
+
+def _normalize_label(label):
+    """Strip an optional agent: prefix so both registry forms compare equal."""
+    label = str(label).strip()
+    return label[6:] if label.lower().startswith("agent:") else label
 
 
 def label_from_branch(branch, labels):
@@ -20,8 +26,8 @@ def label_from_branch(branch, labels):
         return None
     prefix = branch.split("/", 1)[0].lower()
     for label in labels:
-        if prefix == label.lower():
-            return label
+        if prefix == _normalize_label(label).lower():
+            return _normalize_label(label)
     return None
 
 
@@ -37,17 +43,34 @@ def check_pr_body(body, label):
     return False, "missing own-line `Agent: %s` trailer in PR body" % label
 
 
+YAML_LABEL_RE = re.compile(r"^\s*-?\s*\{?\s*label:\s*([A-Za-z0-9_-]+)", re.MULTILINE)
+
+
+DEFAULT_LABELS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                   "registry", "agent-labels.txt")
+
+
 def _load_labels(args):
+    if not args.labels and not args.labels_file and os.path.exists(DEFAULT_LABELS_FILE):
+        args = argparse.Namespace(labels=None, labels_file=DEFAULT_LABELS_FILE)
     if args.labels:
-        return [s.strip() for s in args.labels.split(",") if s.strip()]
+        return [_normalize_label(s) for s in args.labels.split(",") if s.strip()]
     if args.labels_file:
         with open(args.labels_file, encoding="utf-8") as fh:
-            data = json.load(fh)
+            text = fh.read()
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            found = set(YAML_LABEL_RE.findall(text))
+            if found:
+                return sorted(found)
+            # Plain newline/comma-separated list (repo-committed sync file).
+            return sorted(s for s in (l.strip() for l in re.split(r"[\n,]", text)) if s)
         if isinstance(data, dict):
             data = data.get("agents", data)
         if isinstance(data, dict):
-            return sorted(data.keys())
-        return [a["label"] if isinstance(a, dict) else str(a) for a in data]
+            return sorted(_normalize_label(k) for k in data.keys())
+        return [_normalize_label(a["label"] if isinstance(a, dict) else a) for a in data]
     return []
 
 
