@@ -96,21 +96,51 @@ def parse_pr_ref(ref):
     return m.group(1), int(m.group(2))
 
 
-def fetch_pr(repo, number, token_file, opener=None):
-    """Fetch (body, head_branch) for a PR. The token is read into memory and
-    sent as an Authorization header - it never appears in argv (rule 7)."""
-    opener = opener or urllib.request.urlopen
+class RedirectBlocker(urllib.request.HTTPRedirectHandler):
+    """Refuse every redirect so Authorization is never forwarded to another
+    host (pattern from ins-infra #652 nf_desc_check.py)."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(RedirectBlocker())
+
+
+def _read_token(token_file):
+    """Read a token from a file, enforcing the 0600 caller prerequisite."""
+    try:
+        st = os.stat(token_file)
+    except FileNotFoundError:
+        return None  # public repos need no token; private ones fail loudly
+    if st.st_mode & 0o077:
+        raise PermissionError(
+            "token file %s must be mode 0600 (owner-only); found %o" %
+            (token_file, st.st_mode & 0o777))
+    with open(token_file, encoding="utf-8") as fh:
+        return fh.read().strip()
+
+
+def fetch_pr(repo, number, token_file, opener=None, api_base="https://api.github.com"):
+    """Fetch an advisory SNAPSHOT of a PR: body, head branch, head sha, state.
+
+    The token is read into memory and sent as an Authorization header - never
+    in argv (rule 7) - and redirects are never followed, so the header cannot
+    leak cross-origin. The result is a point-in-time snapshot: the merger MUST
+    still verify the PR's live head sha and open state at merge time (sha
+    guard); this function performs no such guard and merges nothing."""
+    open_fn = opener or _OPENER.open
     headers = {"Accept": "application/vnd.github+json"}
-    if token_file:
-        try:
-            with open(token_file, encoding="utf-8") as fh:
-                headers["Authorization"] = "Bearer " + fh.read().strip()
-        except FileNotFoundError:
-            pass  # public repos need no token; private ones will fail loudly
+    token = _read_token(token_file) if token_file else None
+    if token:
+        headers["Authorization"] = "Bearer " + token
     req = urllib.request.Request(
-        "https://api.github.com/repos/%s/pulls/%d" % (repo, number), headers=headers)
-    data = json.loads(opener(req, timeout=30).read().decode())
-    return data.get("body") or "", (data.get("head") or {}).get("ref")
+        "%s/repos/%s/pulls/%d" % (api_base, repo, number), headers=headers)
+    data = json.loads(open_fn(req, timeout=30).read().decode())
+    head = data.get("head") or {}
+    return {"body": data.get("body") or "",
+            "branch": head.get("ref"),
+            "head_sha": head.get("sha"),
+            "state": data.get("state")}
 
 
 def main(argv=None, opener=None):
@@ -128,7 +158,10 @@ def main(argv=None, opener=None):
     body, branch = "", args.branch
     if args.pr:
         repo, number = parse_pr_ref(args.pr)
-        body, branch = fetch_pr(repo, number, args.token_file, opener=opener)
+        snap = fetch_pr(repo, number, args.token_file, opener=opener)
+        body, branch = snap["body"], snap["branch"]
+        print("snapshot: state=%s head=%s (advisory - verify live head sha + open state at merge time)"
+              % (snap["state"], snap["head_sha"]))
     elif args.event_path:
         with open(args.event_path, encoding="utf-8") as fh:
             event = json.load(fh)

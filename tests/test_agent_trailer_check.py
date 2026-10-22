@@ -180,9 +180,9 @@ class PrFetchTest(unittest.TestCase):
         self.addCleanup(os.unlink, tpath)
         captured = []
         payload = {"body": "x\n\nAgent: karim", "head": {"ref": "karim/work"}}
-        body, branch = atc.fetch_pr("ins-labs/ins-infra", 658, tpath,
-                                    opener=self._opener(payload, captured))
-        self.assertEqual((body, branch), ("x\n\nAgent: karim", "karim/work"))
+        result = atc.fetch_pr("ins-labs/ins-infra", 658, tpath,
+                              opener=self._opener(payload, captured))
+        self.assertEqual((result["body"], result["branch"]), ("x\n\nAgent: karim", "karim/work"))
         auth = captured[0].get_header("Authorization")
         self.assertEqual(auth, "Bearer dummy-token")
         self.assertIn("/repos/ins-labs/ins-infra/pulls/658", captured[0].full_url)
@@ -194,3 +194,77 @@ class PrFetchTest(unittest.TestCase):
                        "--token-file", "/nonexistent"],
                       opener=self._opener(payload, captured))
         self.assertEqual(rc, 0)
+
+
+class AmenHoldTest(unittest.TestCase):
+    """PR #48 holds @1109a444: redirect safety, SHA/state snapshot, 0600 enforcement."""
+
+    def test_redirect_never_followed_and_auth_never_leaks(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        hits = []
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                hits.append((self.path, self.headers.get("Authorization")))
+                if self.path.startswith("/repos/"):
+                    self.send_response(302)
+                    self.send_header("Location", "/evil")
+                    self.end_headers()
+                else:
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b"{}")
+            def log_message(self, *a):
+                pass
+        srv = HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        import tempfile
+        fd, tpath = tempfile.mkstemp()
+        with os.fdopen(fd, "w") as fh:
+            fh.write("secret-token")
+        self.addCleanup(os.unlink, tpath)
+        base = "http://127.0.0.1:%d" % srv.server_port
+        with self.assertRaises(Exception):
+            atc.fetch_pr("ins-labs/ins-infra", 658, tpath, api_base=base)
+        evil = [h for h in hits if h[0] == "/evil"]
+        self.assertEqual(evil, [], "redirect target was hit: %r" % evil)
+
+    def test_fetch_returns_head_sha_and_state(self):
+        captured = []
+        payload = {"body": "b", "head": {"ref": "karim/w", "sha": "abc123"}, "state": "open"}
+        class FakeResp:
+            def __init__(self, p):
+                import io, json
+                self._io = io.BytesIO(json.dumps(p).encode())
+            def read(self):
+                return self._io.read()
+        result = atc.fetch_pr("ins-labs/ins-infra", 1, None,
+                              opener=lambda req, timeout=30: FakeResp(payload))
+        self.assertEqual(result["head_sha"], "abc123")
+        self.assertEqual(result["state"], "open")
+
+    def test_world_readable_token_file_refused(self):
+        import tempfile
+        fd, tpath = tempfile.mkstemp()
+        with os.fdopen(fd, "w") as fh:
+            fh.write("tok")
+        os.chmod(tpath, 0o644)
+        self.addCleanup(os.unlink, tpath)
+        with self.assertRaises(PermissionError):
+            atc.fetch_pr("ins-labs/ins-infra", 1, tpath,
+                         opener=lambda req, timeout=30: None)
+
+    def test_0600_token_file_accepted(self):
+        import tempfile
+        fd, tpath = tempfile.mkstemp()
+        with os.fdopen(fd, "w") as fh:
+            fh.write("tok")
+        os.chmod(tpath, 0o600)
+        self.addCleanup(os.unlink, tpath)
+        class FakeResp:
+            def read(self):
+                return b'{"body":"b","head":{"ref":"karim/w","sha":"s"},"state":"open"}'
+        result = atc.fetch_pr("ins-labs/ins-infra", 1, tpath,
+                              opener=lambda req, timeout=30: FakeResp())
+        self.assertEqual(result["branch"], "karim/w")
