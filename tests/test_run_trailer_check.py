@@ -83,30 +83,6 @@ class RealCheckerNoTokenTest(unittest.TestCase):
     def setUp(self):
         import json, threading
         from http.server import BaseHTTPRequestHandler, HTTPServer
-        self.tmp = tempfile.mkdtemp()
-        self.addCleanup(subprocess.run, ["rm", "-rf", self.tmp])
-        org = os.path.join(self.tmp, "org.git")
-        seed = os.path.join(self.tmp, "seed")
-        git("init", "-q", "--bare", org, cwd=self.tmp)
-        git("clone", "-q", org, seed, cwd=self.tmp)
-        git("config", "user.email", "t@t", cwd=seed)
-        git("config", "user.name", "t", cwd=seed)
-        git("checkout", "-qb", "main", cwd=seed)
-        os.makedirs(os.path.join(seed, "tools"))
-        os.makedirs(os.path.join(seed, "registry"))
-        with open(os.path.join(REPO, "tools", "agent_trailer_check.py")) as fh:
-            checker = fh.read()
-        with open(os.path.join(seed, "tools", "agent_trailer_check.py"), "w") as fh:
-            fh.write(checker)
-        with open(os.path.join(seed, "registry", "agent-labels.txt"), "w") as fh:
-            fh.write("dina\nkarim\n")
-        git("add", "-A", cwd=seed)
-        git("commit", "-qm", "real checker", cwd=seed)
-        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=seed,
-                             capture_output=True, text=True, check=True)
-        self.pin = out.stdout.strip()
-        git("push", "-q", "origin", "main", cwd=seed)
-        git("clone", "-q", org, "ins-compliance", cwd=self.tmp)
         self.payload = {"body": "x\n\nAgent: karim",
                         "head": {"ref": "karim/w", "sha": "s"}, "state": "open"}
         outer = self
@@ -124,13 +100,44 @@ class RealCheckerNoTokenTest(unittest.TestCase):
                 pass
 
         self.srv = HTTPServer(("127.0.0.1", 0), H)
+        self.api_port = self.srv.server_port
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
         self.addCleanup(self.srv.shutdown)
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(subprocess.run, ["rm", "-rf", self.tmp])
+        org = os.path.join(self.tmp, "org.git")
+        seed = os.path.join(self.tmp, "seed")
+        git("init", "-q", "--bare", org, cwd=self.tmp)
+        git("clone", "-q", org, seed, cwd=self.tmp)
+        git("config", "user.email", "t@t", cwd=seed)
+        git("config", "user.name", "t", cwd=seed)
+        git("checkout", "-qb", "main", cwd=seed)
+        os.makedirs(os.path.join(seed, "tools"))
+        os.makedirs(os.path.join(seed, "registry"))
+        with open(os.path.join(REPO, "tools", "agent_trailer_check.py")) as fh:
+            checker = fh.read()
+        # Isolated test shim: only the STUB COPY is pointed at the mock API.
+        # The production file keeps api.github.com hard-wired and gains no
+        # env seam (Amen's security hold on #50).
+        assert 'api_base="https://api.github.com"' in checker
+        checker = checker.replace('api_base="https://api.github.com"',
+                                  'api_base="http://127.0.0.1:%d"' % self.api_port)
+        assert "AGENT_TRAILER_API_BASE" not in checker
+        with open(os.path.join(seed, "tools", "agent_trailer_check.py"), "w") as fh:
+            fh.write(checker)
+        with open(os.path.join(seed, "registry", "agent-labels.txt"), "w") as fh:
+            fh.write("dina\nkarim\n")
+        git("add", "-A", cwd=seed)
+        git("commit", "-qm", "real checker", cwd=seed)
+        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=seed,
+                             capture_output=True, text=True, check=True)
+        self.pin = out.stdout.strip()
+        git("push", "-q", "origin", "main", cwd=seed)
+        git("clone", "-q", org, "ins-compliance", cwd=self.tmp)
 
     def _run(self):
         env = {k: v for k, v in os.environ.items() if k != "GH_TOKEN_FILE"}
         env["INS_COMPLIANCE_PIN"] = self.pin
-        env["AGENT_TRAILER_API_BASE"] = "http://127.0.0.1:%d" % self.srv.server_port
         return subprocess.run(["bash", SCRIPT, "owner/repo#1", os.path.join(self.tmp, "ins-compliance")],
                               env=env, cwd=self.tmp,
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
@@ -142,3 +149,11 @@ class RealCheckerNoTokenTest(unittest.TestCase):
         self.payload = {"body": "no trailer",
                         "head": {"ref": "karim/w", "sha": "s"}, "state": "open"}
         self.assertEqual(self._run(), 1)
+
+
+class ProductionEndpointGuardTest(unittest.TestCase):
+    def test_production_checker_has_no_env_api_seam(self):
+        with open(os.path.join(REPO, "tools", "agent_trailer_check.py")) as fh:
+            src = fh.read()
+        self.assertNotIn("AGENT_TRAILER_API_BASE", src)
+        self.assertIn('api_base="https://api.github.com"', src)

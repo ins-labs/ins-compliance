@@ -268,3 +268,41 @@ class AmenHoldTest(unittest.TestCase):
         result = atc.fetch_pr("ins-labs/ins-infra", 1, tpath,
                               opener=lambda req, timeout=30: FakeResp())
         self.assertEqual(result["branch"], "karim/w")
+
+
+class EnvEndpointSeamRegressionTest(unittest.TestCase):
+    """Samir's #50 PoC (prove50): the checker must NOT honour any env endpoint
+    override - a forged base URL must receive nothing, token or otherwise."""
+
+    def test_env_override_receives_no_request(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        seen = []
+
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen.append(self.headers.get("Authorization"))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"body":"Agent: karim","head":{"ref":"karim/x","sha":"fake"},"state":"open"}')
+
+            def log_message(self, *a):
+                pass
+
+        srv = HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        import tempfile
+        fd, tpath = tempfile.mkstemp()
+        with os.fdopen(fd, "w") as fh:
+            fh.write("FAKE-ONLY-TEST-TOKEN")
+        os.chmod(tpath, 0o600)
+        self.addCleanup(os.unlink, tpath)
+        for var in ("AGENT_TRAILER_API_BASE", "AGENT_TRAILER_API_URL", "GITHUB_API_URL"):
+            os.environ[var] = "http://127.0.0.1:%d" % srv.server_port
+            self.addCleanup(os.environ.pop, var, None)
+        try:
+            atc.main(["--pr", "owner/repo#1", "--token-file", tpath])
+        except Exception:
+            pass  # real api.github.com rejects the fake token; either way...
+        self.assertEqual(seen, [], "env override endpoint was contacted: %r" % seen)
