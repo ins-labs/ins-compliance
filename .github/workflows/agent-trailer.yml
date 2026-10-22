@@ -10,10 +10,4 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Fetch agent labels from ins-infra registry
-        run: |
-          curl -sf -H "Authorization: Bearer ${{ secrets.INS_ORG_READ_TOKEN }}" \
-            https://raw.githubusercontent.com/ins-labs/ins-infra/main/registry/agents.yaml \
-            | grep -oE 'agent:[a-z0-9-]+' | sort -u > /tmp/labels.txt
-      - name: Check Agent trailer
-        run: python3 tools/agent_trailer_check.py --event-path "$GITHUB_EVENT_PATH" --labels "$(cat /tmp/labels.txt)"
+      - run: python3 tools/agent_trailer_check.py --event-path "$GITHUB_EVENT_PATH"
