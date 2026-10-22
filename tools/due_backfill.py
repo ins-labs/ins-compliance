@@ -18,7 +18,7 @@ Safety:
 - Token via GH_TOKEN_FILE (mode 400/440/600/640), never printed.
 - 1 s pause between writes (small batches).
 """
-import datetime, difflib, json, os, re, stat, sys, time, urllib.request
+import datetime, difflib, json, os, re, stat, sys, time, urllib.request, urllib.error
 
 API = "https://api.github.com"
 ORG = "ins-labs"
@@ -204,6 +204,25 @@ def run_audit(tok, allow):
           file=sys.stderr)
 
 
+def repo_commits(tok, repo, since):
+    """Return commits; GitHub's specific empty-repository 409 means none.
+    Other conflicts, auth failures and malformed responses remain errors.
+    """
+    try:
+        return list_paginated(
+            tok, "/repos/%s/%s/commits?since=%sT00:00:00Z" % (ORG, repo, since))
+    except urllib.error.HTTPError as exc:
+        if exc.code != 409:
+            raise
+        try:
+            payload = json.loads(exc.read())
+        except (ValueError, UnicodeError):
+            raise exc
+        if isinstance(payload, dict) and payload.get("message") == "Git Repository is empty.":
+            return []
+        raise exc
+
+
 def run_audit_trailers(tok, allow, since):
     repos = sorted(allow) if allow else [
         r["name"] for r in list_paginated(tok, "/orgs/%s/repos?type=all" % ORG)]
@@ -213,8 +232,7 @@ def run_audit_trailers(tok, allow, since):
         lambda: base64.b64decode(gh("GET", "/repos/%s/ins-infra/contents/registry/agents.yaml"
             % ORG, tok)["content"]).decode())
     for repo in repos:
-        commits = list_paginated(
-            tok, "/repos/%s/%s/commits?since=%sT00:00:00Z" % (ORG, repo, since))
+        commits = repo_commits(tok, repo, since)
         row = trailer_rows(repo, commits)
         print(json.dumps(row))
         t += row["total"]
