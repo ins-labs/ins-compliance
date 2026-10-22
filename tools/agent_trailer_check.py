@@ -1,17 +1,22 @@
-"""Agent-trailer merge check (issue #46, ADR-0003).
+"""Agent-trailer hygiene check (issue #46, ADR-0003).
 
-Verifies that a PR body carries an `Agent: <label>` trailer on its own line,
-where <label> is derived from the head branch prefix and validated against the
-registry labels. Exits 1 (failing the CI check) when the trailer is missing or
-mismatched, so a squash merge can never land without attribution.
+ADVISORY HYGIENE ONLY - not a security or identity gate. It verifies that a PR
+body carries exactly one distinct own-line `Agent: <label>` trailer (outside
+fenced code blocks), where <label> is derived from the head branch prefix and
+validated against the committed registry/agent-labels.txt. Branch names are
+self-claims, not authenticated ownership; on pull_request events the checked
+code and label file come from the PR itself, so a contributor can modify them
+to self-pass. Treat a PASS as housekeeping signal, never as proof of
+authorship. No merge, status write, or deployment is performed.
 
 CLI:
-    python3 tools/agent_trailer_check.py --body-file BODY --branch HEAD_BRANCH --labels karim,dina,...
-    python3 tools/agent_trailer_check.py --event-path GITHUB_EVENT_PATH --labels-file registry.json
+    python3 tools/agent_trailer_check.py --event-path GITHUB_EVENT_PATH
+    python3 tools/agent_trailer_check.py --body-file BODY --branch HEAD [--labels a,b | --labels-file F]
 """
 import argparse, json, os, re, sys
 
 TRAILER_RE = re.compile(r"^[ \t]*agent[ \t]*:[ \t]*([A-Za-z0-9_-]+)[ \t]*$", re.IGNORECASE | re.MULTILINE)
+FENCE_RE = re.compile(r"^[ \t]*(```|~~~).*?(?:^[ \t]*\1|\Z)", re.MULTILINE | re.DOTALL)
 
 
 def _normalize_label(label):
@@ -32,14 +37,20 @@ def label_from_branch(branch, labels):
 
 
 def check_pr_body(body, label):
-    """Return (ok, detail): ok iff body has an own-line `Agent: <label>` trailer."""
+    """Return (ok, detail): ok iff body declares exactly one distinct agent,
+    matching `label`, via an own-line trailer outside fenced code blocks."""
     if not label:
         return False, "could not derive an agent label from the head branch; use <label>/branch-name"
-    found = [m.group(1) for m in TRAILER_RE.finditer(body or "")]
-    if any(f.lower() == label.lower() for f in found):
+    text = (body or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = FENCE_RE.sub("\n", text)
+    found = [m.group(1) for m in TRAILER_RE.finditer(text)]
+    distinct = {f.lower() for f in found}
+    if len(distinct) > 1:
+        return False, "conflicting Agent trailers %s; exactly one distinct agent required" % sorted(distinct)
+    if distinct and label.lower() in distinct:
         return True, "Agent: %s trailer present" % label
-    if found:
-        return False, "Agent trailer(s) %s do not match branch label %r" % (found, label)
+    if distinct:
+        return False, "Agent trailer %s does not match branch label %r" % (sorted(distinct), label)
     return False, "missing own-line `Agent: %s` trailer in PR body" % label
 
 

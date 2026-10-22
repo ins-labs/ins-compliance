@@ -106,3 +106,47 @@ class RepoDefaultLabelsTest(unittest.TestCase):
         labels = atc._load_labels(args)
         self.assertIn("karim", labels)
         self.assertIn("dina", labels)
+
+
+class SamirReviewTest(unittest.TestCase):
+    """PR #47 review @407308ab: fenced exclusion, conflict rejection, CRLF."""
+
+    def test_fenced_example_is_not_a_declaration(self):
+        body = "Fixes thing\n\n```\nAgent: karim\n```\n"
+        ok, detail = atc.check_pr_body(body, "karim")
+        self.assertFalse(ok)
+        self.assertIn("missing", detail)
+
+    def test_tilde_fence_also_ignored(self):
+        body = "notes\n\n~~~\nAgent: karim\n~~~\n"
+        ok, _ = atc.check_pr_body(body, "karim")
+        self.assertFalse(ok)
+
+    def test_conflicting_agents_fail(self):
+        body = "body\n\nAgent: dina\nAgent: karim\n"
+        ok, detail = atc.check_pr_body(body, "karim")
+        self.assertFalse(ok)
+        self.assertIn("conflicting", detail.lower())
+
+    def test_conflicting_agents_fail_even_if_branch_agent_present_first(self):
+        body = "body\n\nAgent: karim\nAgent: dina\n"
+        ok, _ = atc.check_pr_body(body, "karim")
+        self.assertFalse(ok)
+
+    def test_duplicate_identical_trailer_is_unambiguous(self):
+        body = "body\n\nAgent: karim\nAgent: karim\n"
+        ok, detail = atc.check_pr_body(body, "karim")
+        self.assertTrue(ok, detail)
+
+    def test_crlf_trailer_accepted(self):
+        ok, detail = atc.check_pr_body("body\r\n\r\nAgent: karim\r\n", "karim")
+        self.assertTrue(ok, detail)
+
+    def test_crlf_conflict_still_detected(self):
+        ok, _ = atc.check_pr_body("b\r\nAgent: karim\r\nAgent: dina\r\n", "karim")
+        self.assertFalse(ok)
+
+    def test_real_trailer_outside_fence_still_passes(self):
+        body = "```\nAgent: dina\n```\nreal one:\n\nAgent: karim\n"
+        ok, detail = atc.check_pr_body(body, "karim")
+        self.assertTrue(ok, detail)
