@@ -150,3 +150,47 @@ class SamirReviewTest(unittest.TestCase):
         body = "```\nAgent: dina\n```\nreal one:\n\nAgent: karim\n"
         ok, detail = atc.check_pr_body(body, "karim")
         self.assertTrue(ok, detail)
+
+
+class PrFetchTest(unittest.TestCase):
+    """Merger-lane mode: --pr owner/repo#num fetches body+branch with the
+    token held in memory (rule 7), never in argv."""
+
+    class FakeResp:
+        def __init__(self, payload):
+            import io, json
+            self._io = io.BytesIO(json.dumps(payload).encode())
+        def read(self):
+            return self._io.read()
+
+    def _opener(self, payload, captured):
+        def open(req, timeout=30):
+            captured.append(req)
+            return self.FakeResp(payload)
+        return open
+
+    def test_parses_repo_and_number(self):
+        self.assertEqual(atc.parse_pr_ref("ins-labs/ins-infra#658"), ("ins-labs/ins-infra", 658))
+
+    def test_fetch_uses_header_not_argv_and_returns_body_branch(self):
+        import tempfile
+        fd, tpath = tempfile.mkstemp()
+        with os.fdopen(fd, "w") as fh:
+            fh.write("dummy-token")
+        self.addCleanup(os.unlink, tpath)
+        captured = []
+        payload = {"body": "x\n\nAgent: karim", "head": {"ref": "karim/work"}}
+        body, branch = atc.fetch_pr("ins-labs/ins-infra", 658, tpath,
+                                    opener=self._opener(payload, captured))
+        self.assertEqual((body, branch), ("x\n\nAgent: karim", "karim/work"))
+        auth = captured[0].get_header("Authorization")
+        self.assertEqual(auth, "Bearer dummy-token")
+        self.assertIn("/repos/ins-labs/ins-infra/pulls/658", captured[0].full_url)
+
+    def test_main_pr_mode_end_to_end(self):
+        captured = []
+        payload = {"body": "x\n\nAgent: karim", "head": {"ref": "karim/work"}}
+        rc = atc.main(["--pr", "ins-labs/ins-infra#658", "--labels", "karim,dina",
+                       "--token-file", "/nonexistent"],
+                      opener=self._opener(payload, captured))
+        self.assertEqual(rc, 0)

@@ -13,7 +13,7 @@ CLI:
     python3 tools/agent_trailer_check.py --event-path GITHUB_EVENT_PATH
     python3 tools/agent_trailer_check.py --body-file BODY --branch HEAD [--labels a,b | --labels-file F]
 """
-import argparse, json, os, re, sys
+import argparse, json, os, re, sys, urllib.request
 
 TRAILER_RE = re.compile(r"^[ \t]*agent[ \t]*:[ \t]*([A-Za-z0-9_-]+)[ \t]*$", re.IGNORECASE | re.MULTILINE)
 FENCE_RE = re.compile(r"^[ \t]*(```|~~~).*?(?:^[ \t]*\1|\Z)", re.MULTILINE | re.DOTALL)
@@ -85,17 +85,51 @@ def _load_labels(args):
     return []
 
 
-def main(argv=None):
+PR_REF_RE = re.compile(r"^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(\d+)$")
+
+
+def parse_pr_ref(ref):
+    """Parse 'owner/repo#number' into (repo, number)."""
+    m = PR_REF_RE.match(ref or "")
+    if not m:
+        raise ValueError("expected owner/repo#number, got %r" % ref)
+    return m.group(1), int(m.group(2))
+
+
+def fetch_pr(repo, number, token_file, opener=None):
+    """Fetch (body, head_branch) for a PR. The token is read into memory and
+    sent as an Authorization header - it never appears in argv (rule 7)."""
+    opener = opener or urllib.request.urlopen
+    headers = {"Accept": "application/vnd.github+json"}
+    if token_file:
+        try:
+            with open(token_file, encoding="utf-8") as fh:
+                headers["Authorization"] = "Bearer " + fh.read().strip()
+        except FileNotFoundError:
+            pass  # public repos need no token; private ones will fail loudly
+    req = urllib.request.Request(
+        "https://api.github.com/repos/%s/pulls/%d" % (repo, number), headers=headers)
+    data = json.loads(opener(req, timeout=30).read().decode())
+    return data.get("body") or "", (data.get("head") or {}).get("ref")
+
+
+def main(argv=None, opener=None):
     ap = argparse.ArgumentParser(description="Fail CI when a PR body lacks the branch's Agent trailer")
     ap.add_argument("--body-file")
     ap.add_argument("--branch")
     ap.add_argument("--event-path", help="GitHub Actions event JSON (pull_request)")
     ap.add_argument("--labels")
     ap.add_argument("--labels-file")
+    ap.add_argument("--pr", help="owner/repo#number - merger-lane mode, fetches body+branch via API")
+    ap.add_argument("--token-file", default=os.environ.get("GH_TOKEN_FILE"),
+                    help="0600 file holding a read token (default: $GH_TOKEN_FILE)")
     args = ap.parse_args(argv)
     labels = _load_labels(args)
     body, branch = "", args.branch
-    if args.event_path:
+    if args.pr:
+        repo, number = parse_pr_ref(args.pr)
+        body, branch = fetch_pr(repo, number, args.token_file, opener=opener)
+    elif args.event_path:
         with open(args.event_path, encoding="utf-8") as fh:
             event = json.load(fh)
         pr = event.get("pull_request", {})
