@@ -55,6 +55,23 @@ def parse_agents_yaml(text):
             agents.update(a.strip() for a in am.group(1).split(",") if a.strip())
     return agents
 
+
+def load_registry(fetcher):
+    """Registry fetch + parse with an explicit fail mode (issue #40).
+    fetcher() returns the agents.yaml text or raises. Returns
+    (agents, fetched): (None, False) on fetch failure (legacy fallback,
+    silent), (set, True) on success - with a stderr WARNING when the
+    parse came back empty, so a silent mute shows up in the run log."""
+    try:
+        text = fetcher()
+    except Exception:
+        return None, False
+    agents = parse_agents_yaml(text)
+    if not agents:
+        print("WARNING: registry fetch succeeded but parsed ZERO agent labels"
+              " - misattribution check is muted for this run", file=sys.stderr)
+    return agents, True
+
 def pr_number(subject):
     """Pure: squash-merge subject -> PR number, or None (issue #36)."""
     m = PRNUM_RE.search(subject)
@@ -191,13 +208,10 @@ def run_audit_trailers(tok, allow, since):
     repos = sorted(allow) if allow else [
         r["name"] for r in list_paginated(tok, "/orgs/%s/repos?type=all" % ORG)]
     t = w = m = 0
-    agents = None
-    try:
-        raw = gh("GET", "/repos/%s/ins-infra/contents/registry/agents.yaml" % ORG, tok)
-        import base64
-        agents = parse_agents_yaml(base64.b64decode(raw["content"]).decode())
-    except Exception:
-        agents = None  # fall back to flag-without-registry
+    import base64
+    agents, _fetched = load_registry(
+        lambda: base64.b64decode(gh("GET", "/repos/%s/ins-infra/contents/registry/agents.yaml"
+            % ORG, tok)["content"]).decode())
     for repo in repos:
         commits = list_paginated(
             tok, "/repos/%s/%s/commits?since=%sT00:00:00Z" % (ORG, repo, since))
