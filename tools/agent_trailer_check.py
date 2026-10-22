@@ -158,7 +158,8 @@ def main(argv=None, opener=None):
     body, branch = "", args.branch
     if args.pr:
         repo, number = parse_pr_ref(args.pr)
-        snap = fetch_pr(repo, number, args.token_file, opener=opener)
+        api_base = os.environ.get("AGENT_TRAILER_API_BASE", "https://api.github.com")
+        snap = fetch_pr(repo, number, args.token_file, opener=opener, api_base=api_base)
         body, branch = snap["body"], snap["branch"]
         print("snapshot: state=%s head=%s (advisory - verify live head sha + open state at merge time)"
               % (snap["state"], snap["head_sha"]))

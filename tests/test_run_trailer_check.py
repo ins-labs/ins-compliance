@@ -43,7 +43,8 @@ class RunTrailerCheckTest(unittest.TestCase):
         git("clone", "-q", org, "ins-compliance", cwd=self.tmp)
 
     def _run(self, pin):
-        env = dict(os.environ, INS_COMPLIANCE_PIN=pin, GH_TOKEN_FILE="/dev/null")
+        env = {k: v for k, v in os.environ.items() if k != "GH_TOKEN_FILE"}
+        env["INS_COMPLIANCE_PIN"] = pin
         return subprocess.run(["bash", SCRIPT, "owner/repo#1", os.path.join(self.tmp, "ins-compliance")],
                               env=env, cwd=self.tmp,
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
@@ -72,3 +73,72 @@ class RunTrailerCheckTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RealCheckerNoTokenTest(unittest.TestCase):
+    """Amen's #50 hold: run the script against a stub repo carrying the REAL
+    checker + labels, with NO GH_TOKEN_FILE set and a mock API server, proving
+    the no-token path reaches the API instead of dying on file perms."""
+
+    def setUp(self):
+        import json, threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(subprocess.run, ["rm", "-rf", self.tmp])
+        org = os.path.join(self.tmp, "org.git")
+        seed = os.path.join(self.tmp, "seed")
+        git("init", "-q", "--bare", org, cwd=self.tmp)
+        git("clone", "-q", org, seed, cwd=self.tmp)
+        git("config", "user.email", "t@t", cwd=seed)
+        git("config", "user.name", "t", cwd=seed)
+        git("checkout", "-qb", "main", cwd=seed)
+        os.makedirs(os.path.join(seed, "tools"))
+        os.makedirs(os.path.join(seed, "registry"))
+        with open(os.path.join(REPO, "tools", "agent_trailer_check.py")) as fh:
+            checker = fh.read()
+        with open(os.path.join(seed, "tools", "agent_trailer_check.py"), "w") as fh:
+            fh.write(checker)
+        with open(os.path.join(seed, "registry", "agent-labels.txt"), "w") as fh:
+            fh.write("dina\nkarim\n")
+        git("add", "-A", cwd=seed)
+        git("commit", "-qm", "real checker", cwd=seed)
+        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=seed,
+                             capture_output=True, text=True, check=True)
+        self.pin = out.stdout.strip()
+        git("push", "-q", "origin", "main", cwd=seed)
+        git("clone", "-q", org, "ins-compliance", cwd=self.tmp)
+        self.payload = {"body": "x\n\nAgent: karim",
+                        "head": {"ref": "karim/w", "sha": "s"}, "state": "open"}
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = json.dumps(outer.payload).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        self.srv = HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.addCleanup(self.srv.shutdown)
+
+    def _run(self):
+        env = {k: v for k, v in os.environ.items() if k != "GH_TOKEN_FILE"}
+        env["INS_COMPLIANCE_PIN"] = self.pin
+        env["AGENT_TRAILER_API_BASE"] = "http://127.0.0.1:%d" % self.srv.server_port
+        return subprocess.run(["bash", SCRIPT, "owner/repo#1", os.path.join(self.tmp, "ins-compliance")],
+                              env=env, cwd=self.tmp,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+
+    def test_no_token_pass_with_trailer(self):
+        self.assertEqual(self._run(), 0)
+
+    def test_no_token_fail_without_trailer(self):
+        self.payload = {"body": "no trailer",
+                        "head": {"ref": "karim/w", "sha": "s"}, "state": "open"}
+        self.assertEqual(self._run(), 1)

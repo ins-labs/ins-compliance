@@ -34,8 +34,12 @@ run_trailer_check() {
     _rtc_cleanup 1
     return $?
   fi
-  GH_TOKEN_FILE="${GH_TOKEN_FILE:-/dev/null}" \
-    python3 -I "$wt/tools/agent_trailer_check.py" --pr "$pr"
+  # No default token path: a placeholder like /dev/null is 0666 and the
+  # checker's 0600 enforcement would fail before any API call. When the
+  # caller set GH_TOKEN_FILE we export it; otherwise the checker runs
+  # unauthenticated (public repos) and fails loudly on private ones.
+  [ -n "${GH_TOKEN_FILE:-}" ] && export GH_TOKEN_FILE
+  python3 -I "$wt/tools/agent_trailer_check.py" --pr "$pr"
   rc=$?
   _rtc_cleanup "$rc"
 }
