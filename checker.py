@@ -124,6 +124,20 @@ def _cairo_today(now):
         return datetime.datetime.fromtimestamp(now + 7200, datetime.timezone.utc).date()
 
 
+def _usable_due(due):
+    """True only when the Due value parses as an ISO date. V3 flags a missing
+    or unparseable Due as "no usable due"; the baseline no_due count must use
+    the same semantics so a malformed non-empty Due is not counted as covered."""
+    if not due:
+        return False
+    import datetime
+    try:
+        datetime.date.fromisoformat(due)
+    except ValueError:
+        return False
+    return True
+
+
 def github_issue_hygiene(rule, gh_data, now, baseline=False):
     """R17 (Dina's R17_rewrite_v1, label model). Input: gh_snapshot.py rows
     (issues + open PRs) and the agent registry label set. Flags carry the
@@ -221,16 +235,12 @@ def github_issue_hygiene(rule, gh_data, now, baseline=False):
                     unattributed += 1
             else:
                 unattributed += 1
-        if not it.get("due"):
-            flag(ident, 3)
+        if not _usable_due(it.get("due")):
+            flag(ident, 3)  # missing or unparseable due = no usable due
         else:
             import datetime
-            try:
-                due_d = datetime.date.fromisoformat(it["due"])
-                if due_d < today:
-                    flag(ident, 4, (now - it["updated_ts"]) / 60)
-            except ValueError:
-                flag(ident, 3)  # unparseable due = no usable due
+            if datetime.date.fromisoformat(it["due"]) < today:
+                flag(ident, 4, (now - it["updated_ts"]) / 60)
         if (it.get("status") or "").strip().lower() == "done":
             pass  # issue #17: project Done = finished work, never stale
         elif not it.get("blocked_line_present"):
@@ -273,7 +283,7 @@ def github_issue_hygiene(rule, gh_data, now, baseline=False):
         counts = {"open_issues": len(issues), "open_prs": len(prs),
                   "owned": sum(1 for it in issues if resolve_owner(it)[0]),
                   "no_agent_label": sum(1 for it in issues if not it.get("agent")),
-                  "no_due": sum(1 for it in issues if not it.get("due")),
+                  "no_due": sum(1 for it in issues if not _usable_due(it.get("due"))),
                   "blocked_marked": sum(1 for it in issues if it.get("blocked_line_present")),
                   "editor_unattributed": unattributed,
                   "would_flag": {("V%d" % v): c for v, c in vcount.items() if c}}

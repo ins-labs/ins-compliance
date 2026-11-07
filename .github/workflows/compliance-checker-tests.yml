@@ -1,0 +1,70 @@
+name: compliance-checker-tests
+on:
+  push:
+    branches: [daryan/5-due-baseline-tests]
+  pull_request:
+    branches: [main]
+    paths:
+      - checker.py
+      - tests/**
+      - rules.yaml
+      - adapter.py
+      - gh_snapshot.py
+      - tools/**
+      - registry/**
+      - wrapper.sh
+      - .github/workflows/compliance-checker-tests.yml
+permissions:
+  contents: read
+jobs:
+  checker-tests:
+    if: github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Record source and interpreter
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD
+          python3 --version
+          python3 -c 'import sys; assert sys.version_info >= (3, 9), "Python >=3.9 required"'
+          command -v git
+          command -v bash
+      - name: Five Due regressions and complete repository test suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d)
+          trap 'rm -rf "$work"' EXIT
+          mkdir "$work/home" "$work/tmp"
+          env -i PATH="$PATH" HOME="$work/home" TMPDIR="$work/tmp" PYTHONPATH="$PWD:$PWD/tests" python3 - <<'PY'
+          import json
+          import sys
+          import unittest
+          loader = unittest.TestLoader()
+          due = loader.discover('tests', pattern='test_checker_r17_due_baseline.py')
+          count = due.countTestCases()
+          if count != 5:
+              print('DUE_DISCOVERY_REFUSED count=%s expected=5' % count, flush=True)
+          due_result = unittest.TextTestRunner(verbosity=2).run(due)
+          full = unittest.TestLoader().discover('tests')
+          full_result = unittest.TextTestRunner(verbosity=2).run(full)
+          def report(result):
+              return {'tests_run': result.testsRun, 'failures': len(result.failures),
+                      'errors': len(result.errors), 'skipped': len(result.skipped),
+                      'skip_reasons': [reason for test, reason in result.skipped],
+                      'expected_failures': len(result.expectedFailures),
+                      'unexpected_successes': len(result.unexpectedSuccesses),
+                      'successful': result.wasSuccessful()}
+          qualified = (count == 5 and due_result.wasSuccessful() and due_result.testsRun == 5
+                       and not due_result.skipped and full_result.wasSuccessful()
+                       and full_result.testsRun > 0)
+          print('COMPLIANCE_CHECKER_TEST_RESULT ' + json.dumps({
+              'due_discovered': count, 'due_expected': 5,
+              'due': report(due_result), 'full': report(full_result),
+              'qualification_pass': qualified}, sort_keys=True), flush=True)
+          raise SystemExit(0 if qualified else 1)
+          PY
