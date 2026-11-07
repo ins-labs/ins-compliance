@@ -69,8 +69,6 @@ class R33Test(unittest.TestCase):
         self.assertEqual(out["flags"], [])
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 class R33CliConfigPositionTest(unittest.TestCase):
     """Samir note on PR #19: dm_topics is adopted ONLY from the documented
