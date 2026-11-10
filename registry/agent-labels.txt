@@ -7,6 +7,7 @@ branding
 bridge
 calls
 dailyaya
+dameg
 daryan
 dina
 gawaher
